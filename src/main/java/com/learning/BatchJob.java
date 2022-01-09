@@ -19,6 +19,7 @@
 package com.learning;
 
 import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.LocalEnvironment;
 
 /**
  * Skeleton for a Flink Batch Job.
@@ -31,10 +32,17 @@ import org.apache.flink.api.java.ExecutionEnvironment;
  * and run 'mvn clean package' on the command line.
  */
 public class BatchJob {
+	static class FlinkProgrammeStructure{
+		private void getEnvironment(){
+			// set up the batch execution environment
+			final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+			LocalEnvironment localEnvironment = ExecutionEnvironment.createLocalEnvironment(3);
+			ExecutionEnvironment.createRemoteEnvironment(
+					"JobManagerHost",6021,5,"/user/applicaiton.jar");
+		}
+	}
 
 	public static void main(String[] args) throws Exception {
-		// set up the batch execution environment
-		final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 
 		/*
 		 * Here, you can start creating your execution plan for Flink.
@@ -61,6 +69,6 @@ public class BatchJob {
 		 */
 
 		// execute program
-		env.execute("Flink Batch Java API Skeleton");
+		//env.execute("Flink Batch Java API Skeleton");
 	}
 }
