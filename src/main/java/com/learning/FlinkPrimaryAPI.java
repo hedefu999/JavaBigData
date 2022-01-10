@@ -27,6 +27,7 @@ import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.functions.KeySelector;
@@ -36,6 +37,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.TimeCharacteristic;
+import org.apache.flink.streaming.api.datastream.AllWindowedStream;
 import org.apache.flink.streaming.api.datastream.ConnectedStreams;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
@@ -52,8 +54,18 @@ import org.apache.flink.streaming.api.functions.sink.SocketClientSink;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.streaming.api.windowing.assigners.EventTimeSessionWindows;
+import org.apache.flink.streaming.api.windowing.assigners.SessionWindowTimeGapExtractor;
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.assigners.WindowAssigner;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.triggers.Trigger;
+import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.types.Value;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
@@ -65,6 +77,7 @@ import java.lang.reflect.Type;
 import java.nio.channels.SelectionKey;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -445,16 +458,11 @@ public class FlinkPrimaryAPI {
 		}
 		//## 相关API的使用（两种生成方式）
 		void primary(){
-			List<PageEvent> input = Arrays.asList(
-					PageEvent.createPageEvent("jack","a01","2022-01-03 12:12:15","buy"),
-					PageEvent.createPageEvent("jack","a01","2022-01-03 12:15:15", "view"),
-					PageEvent.createPageEvent("lucy","a02","2022-01-03 12:17:00", "scroll")
-			);
 			//1. 在Source Function中直接定义Timestamps 和 Watermarks
 			streamEnv.addSource(new SourceFunction<PageEvent>() {
 				@Override
 				public void run(SourceContext<PageEvent> ctx) throws Exception {
-					input.forEach(item -> {
+					FlinkSourceDataUtils.PAGEEVENTS.forEach(item -> {
 						//告诉flink输入的数据的哪个字段是EventTime(指定时间戳字段，应该是秒为单位的long,建议使用primary type)
 						ctx.collectWithTimestamp(item, item.getTimestamp());
 						//告诉flink时间到达的最大延迟，过了这个时间就不管了，先处理数据吧
@@ -476,7 +484,7 @@ public class FlinkPrimaryAPI {
 				+ Periodic Watermarks（AssignerWithPeriodicWatermarks）: 根据 设定的时间间隔 生成watermarks
 				+ Punctuated Watermarks（）: 根据 设定的数据数量 生成watermarks
 			 */
-			DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(input);
+			DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
 			//这个被废弃的API是理想状态下使用的递增时间戳生成watermarks策略，要求数据到达有序或者kafka分区内部有序（这样flink能保证union/connect后也是有序的，官网上说）
 			pageEventDataSource.assignTimestampsAndWatermarks(new AscendingTimestampExtractor<PageEvent>(){
 				@Override
@@ -541,6 +549,50 @@ public class FlinkPrimaryAPI {
 
 		public static void main(String[] args) {
 
+		}
+	}
+
+	/**
+	 * 终极特性： # window窗口计算
+	 */
+	static class AboutWindowsCalculator{
+		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
+		static void fourKindsOfWindowsAPI(){
+			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(new KeySelector<PageEvent, String>() {
+				@Override
+				public String getKey(PageEvent value) throws Exception {
+					return value.getUserId();
+				}
+			});
+			//AllWindowedStream<PageEvent, Window> allWindowedStream = pageEventDataSource.windowAll(...);
+
+			//滚动窗口处理5分钟内的数据 TumblingEventTimeWindows/TumblingProcessTimeWindows
+			keyedStream.window(TumblingEventTimeWindows.of(Time.minutes(5)))
+				.process(new ProcessWindowFunction<PageEvent, Integer, String, TimeWindow>() {
+					@Override
+					public void process(String s, Context context, Iterable<PageEvent> elements, Collector<Integer> out) throws Exception {
+						//???
+					}
+				});
+			//timeWindow api已废弃
+			keyedStream.timeWindow(Time.seconds(10)).process(null);
+
+			//滑动窗口:每50秒统计30分钟内的事件，对应的SlidingProcessingTimeWindows用法类似
+			keyedStream.window(SlidingEventTimeWindows.of(Time.minutes(30), Time.seconds(50)))
+					.process(null);
+			//这种timeWindow需要指定UTC时差，国内是Time.hours(-8)，所以api废弃了
+			keyedStream.timeWindow(Time.minutes(30),Time.seconds(50)).process(null);
+
+			//会话窗口：
+			keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(10))).process(null);
+			//session gap可以动态调整
+			keyedStream.window(EventTimeSessionWindows.withDynamicGap(new SessionWindowTimeGapExtractor<PageEvent>() {
+				@Override
+				public long extract(PageEvent element) {
+					//输入性质的页面gap设置地长一点
+					return element.getOperationType().startsWith("input") ? 50 : 10;
+				}
+			}));
 		}
 	}
 
