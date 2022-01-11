@@ -19,6 +19,7 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.JoinFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.ReduceFunction;
@@ -61,7 +62,9 @@ import org.apache.flink.streaming.api.functions.sink.SocketClientSink;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+import org.apache.flink.streaming.api.functions.windowing.ProcessAllWindowFunction;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.functions.windowing.delta.DeltaFunction;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.assigners.EventTimeSessionWindows;
 import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
@@ -69,14 +72,18 @@ import org.apache.flink.streaming.api.windowing.assigners.SessionWindowTimeGapEx
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.WindowAssigner;
+import org.apache.flink.streaming.api.windowing.evictors.DeltaEvictor;
+import org.apache.flink.streaming.api.windowing.evictors.Evictor;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.triggers.ContinuousEventTimeTrigger;
 import org.apache.flink.streaming.api.windowing.triggers.Trigger;
 import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
+import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
 import org.apache.flink.types.Value;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -805,6 +812,96 @@ public class FlinkPrimaryAPI {
 			});
 
 		}
+
+		//Evictor的使用
+		static void abountEvictor(){
+			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(PageEvent::getUserId);
+			keyedStream.window(null).evictor(DeltaEvictor.of(12.0, new DeltaFunction<PageEvent>() {
+				@Override
+				public double getDelta(PageEvent oldDataPoint, PageEvent newDataPoint) {
+					return newDataPoint.getOperationType().length() - oldDataPoint.getOperationType().length();
+				}
+			}));
+			//自定义一个Evictor after before的是对window讲的，而且在before/after中调整元素的顺序，并不能让元素进入window保持有序
+			keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(20)))
+					.evictor(new Evictor<PageEvent, TimeWindow>() {
+						@Override
+						public void evictBefore(Iterable<TimestampedValue<PageEvent>> elements, int size, TimeWindow window, EvictorContext context) {
+
+						}
+						@Override
+						public void evictAfter(Iterable<TimestampedValue<PageEvent>> elements, int size, TimeWindow window, EvictorContext context) {
+
+						}
+					});
+
+		}
+
+		//AllowedLateness 和 SideOutput
+		static void latenessSideoutput(){
+			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(PageEvent::getUserId);
+			OutputTag lateDataOutputTag = new OutputTag("biz_code_topic_late_data");
+			SingleOutputStreamOperator operator =
+					keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(30)))
+						.allowedLateness(Time.seconds(20))
+						//为迟到的数据打标记
+						.sideOutputLateData(lateDataOutputTag)
+						.process(null);
+			//使用标记获取迟到的数据
+			DataStream lateDataStream = operator.getSideOutput(lateDataOutputTag);
+			//将迟到的数据单独取出来存放
+			lateDataStream.addSink(null);
+		}
+
+		//连续窗口计算
+		static void continuousPaneCalculation(){
+			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(PageEvent::getUserId);
+			//独立窗口计算：窗口间元素不相干
+			SingleOutputStreamOperator<Object> operator1 =
+					keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(20))).process(null);
+			SingleOutputStreamOperator<Object> operator2 =
+					keyedStream.window(SlidingEventTimeWindows.of(Time.minutes(1), Time.seconds(10))).process(null);
+			//连续窗口计算：上游pane的元素是下游pane的输入，窗口间信息共享
+			/*
+			需求描述：上游窗口统计最近10分种key的最小值，通过下游窗口统计整个窗口上TopK的值
+			两个窗口的类型和EndTime一致，上游将窗口元数据watermark信息传递到下游窗口中，真正触发计算的是在下游窗口，窗口的计算结果全部在下游窗口中统计得出
+			最终完成在同一个窗口中同时计算与key相关和非key相关的指标
+			 */
+			SingleOutputStreamOperator<PageEvent> operator = keyedStream
+					.window(TumblingEventTimeWindows.of(Time.minutes(10)))
+					.reduce((ReduceFunction<PageEvent>) (value1, value2) ->
+							value1.getUserId().length() < value2.getUserId().length() ? value1 : value2);
+			operator.windowAll(TumblingEventTimeWindows.of(Time.minutes(10)))
+					.process(new ProcessAllWindowFunction<PageEvent,String, TimeWindow>(){
+						@Override
+						public void process(Context context, Iterable<PageEvent> elements, Collector<String> out) throws Exception {
+							elements.forEach(item -> {
+								//if ...
+								out.collect(item.getUserId());
+							});
+						}
+					});
+		}
+	}
+
+	//多流合并计算
+	static class AbountStreamJoin{
+		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
+		/*
+		需求描述：有两个流，数据有重复，但字段部分重合，但key名称不一致，需要inner join一下，去除重复的，join成一个流统计下
+		 */
+		static void multiStream(){
+			KeyedStream<PageEvent, String> keyedStream1 = pageEventDataSource.keyBy(PageEvent::getUserId);
+			KeyedStream<PageEvent, String> keyedStream2 = pageEventDataSource.keyBy(PageEvent::getUserId);
+			keyedStream1.join(keyedStream2)
+					.where((KeySelector<PageEvent, String>) PageEvent::getUserId)
+					.equalTo((KeySelector<PageEvent, String>) PageEvent::getUserNo)
+					.window(TumblingEventTimeWindows.of(Time.minutes(1)))
+					.apply((JoinFunction<PageEvent, PageEvent, String>) (first, second) -> {
+						return first.getUserId()+first.getPageId()+":"+second.getUserNo()+second.getPageId();
+					});
+		}
+
 	}
 
 	public static void main(String[] args) throws Exception {

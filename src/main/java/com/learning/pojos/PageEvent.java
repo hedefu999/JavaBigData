@@ -17,6 +17,7 @@ public class PageEvent {
     private String pageId;
     private long timestamp;
     private String operationType;
+    private String userNo;
 
     public static PageEvent createPageEvent(String userId, String pageId, String time,String operationType){
         PageEvent pageEvent = new PageEvent();
