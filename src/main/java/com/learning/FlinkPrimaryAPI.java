@@ -5,6 +5,7 @@ import com.learning.pojos.Person;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.eventtime.AscendingTimestampsWatermarks;
 import org.apache.flink.api.common.eventtime.BoundedOutOfOrdernessWatermarks;
@@ -15,6 +16,7 @@ import org.apache.flink.api.common.eventtime.WatermarkGenerator;
 import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
 import org.apache.flink.api.common.eventtime.WatermarkOutput;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
@@ -23,10 +25,14 @@ import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.state.ReducingState;
+import org.apache.flink.api.common.state.ReducingStateDescriptor;
+import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.java.ExecutionEnvironment;
@@ -43,6 +49,7 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.datastream.WindowedStream;
 import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.AscendingTimestampExtractor;
@@ -57,11 +64,13 @@ import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrderness
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.api.windowing.assigners.EventTimeSessionWindows;
+import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
 import org.apache.flink.streaming.api.windowing.assigners.SessionWindowTimeGapExtractor;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.WindowAssigner;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.triggers.ContinuousEventTimeTrigger;
 import org.apache.flink.streaming.api.windowing.triggers.Trigger;
 import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
@@ -78,8 +87,10 @@ import java.nio.channels.SelectionKey;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 
 /**
@@ -557,6 +568,8 @@ public class FlinkPrimaryAPI {
 	 */
 	static class AboutWindowsCalculator{
 		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
+
+		//Windows Assigner 如何使用
 		static void fourKindsOfWindowsAPI(){
 			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(new KeySelector<PageEvent, String>() {
 				@Override
@@ -593,6 +606,204 @@ public class FlinkPrimaryAPI {
 					return element.getOperationType().startsWith("input") ? 50 : 10;
 				}
 			}));
+
+			//全局窗口：
+			keyedStream.window(GlobalWindows.create()).process(null);
+		}
+
+		//Trigger的使用
+		static void abountTriggers(){
+			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(PageEvent::getUserId);
+			keyedStream.window(EventTimeSessionWindows.withGap(Time.minutes(2))).trigger(ContinuousEventTimeTrigger.of(Time.minutes(5)));
+			/*
+			自定义窗口触发器
+			先了解每个方法返回的TriggerResult：TriggerResult是一个枚举
+			CONTINUE(false, false) 不触发计算，不触发清理，继续等待
+			FIRE(true, false) 触发计算，但数据保留
+			PURGE(false, true) 清理掉数据，不触发计算
+			FIRE_AND_PURGE(true, true) 触发计算后清除对应数据
+
+			需求描述：窗口是SessionWindow时，如果用户长时间不停操作，导致session gap一直都不生成，该用户的数据长期存储在窗口中，希望每隔5分钟统计下窗口的结果，清除掉数据
+			其实这就是Flink封装的ContinuousEventTimeTrigger的功能
+			 */
+			keyedStream.window(EventTimeSessionWindows.withGap(Time.minutes(2))).trigger(MyContinuousEventTimeTrigger.of(Time.seconds(12)));
+		}
+		/**
+		 * 仿照 ContinuousEventTimeTrigger 实现一个自定义的Trigger（未测试）
+		 * 需要实现的方法很多
+		 * 自定义触发器会覆盖默认触发器中的行为，如EventTimeWindow对应的默认触发器 EventTimeTrigger，需要确保不遗漏默认触发器中的watermark处理代码
+		 * GlobalWindow的默认触发器是NeverTrigger，所以需要自定义触发器确定究竟何时触发，否则会堆积数据直至内存溢出
+		 */
+		public static class MyContinuousEventTimeTrigger extends Trigger<PageEvent, Window> {
+			private long interval;//单位毫秒
+			public MyContinuousEventTimeTrigger(long interval) {
+				this.interval = interval;
+			}
+			public static MyContinuousEventTimeTrigger of(Time interval){
+				return new MyContinuousEventTimeTrigger(interval.toMilliseconds());
+			}
+
+			private StateDescriptor<ReducingState<Long>,Long> stateDescriptor = new ReducingStateDescriptor<Long>(
+					"current_partition_starttime", (ReduceFunction<Long>) (v1, v2) -> Math.min(v1,v2), Types.LONG);
+
+			@Override //针对每一个接入窗口的数据元素进行触发操作,每一个元素过来都会被调用到
+			public TriggerResult onElement(PageEvent pageEvent, long timestamp, Window window, TriggerContext context) throws Exception {
+				//获取当前分区中的最小的时间戳,就是触发窗口计算的时间戳
+				ReducingState<Long> fireTimestampState = context.getPartitionedState(stateDescriptor);
+				Long fireTimestamp = fireTimestampState.get();
+				//如果当前watermark超过窗口的结束时间，则清除定时器内容，直接出发窗口计算
+				if (window.maxTimestamp() <= context.getCurrentWatermark()){
+					//clearTimeeForState(context);
+					if (fireTimestamp != null){
+						context.deleteEventTimeTimer(fireTimestamp);
+					}
+					return TriggerResult.FIRE;
+				}else {
+					//将窗口的结束时间注册到EventTime定时器
+					context.registerEventTimeTimer(window.maxTimestamp());
+					//第一次执行时fire时间戳不存在，需要
+					if (fireTimestamp == null){
+						/*
+						给出19700101到现在的时间戳（假定周期开始时间19700101），执行周期interval，计算下一次触发时间戳
+						19700101 -=-=-=-=-=-=-=-=-=-=-=--=-=-=-=-=-=-=Now
+						|----|----|----|--**interval**--|----|----|--- |<-- 这根线是下一次执行timestamp，如何计算nextFireTimestamp
+						0 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=16xxxx(timestamp)
+						 */
+						long nextFireTimestamp = timestamp - (timestamp % interval) + interval;
+						context.registerEventTimeTimer(nextFireTimestamp);
+						fireTimestampState.add(nextFireTimestamp);
+					}
+					return TriggerResult.CONTINUE;
+				}
+			}
+			@Override //根据接入窗口的ProcessingTime进行触发，window传入的Windows Assigner是EventTimeXXXWindow时，不会基于ProcessingTime触发，直接返回CONTINUE
+			public TriggerResult onProcessingTime(long timestamp, Window window, TriggerContext context) throws Exception {
+				return TriggerResult.CONTINUE;
+			}
+			@Override //watermark超过注册时间时，会执行onEventTime方法(此实现类应付场景是每 interval(12s)统计过去 window(2分钟)的数据)
+			public TriggerResult onEventTime(long timestamp, Window window, TriggerContext context) throws Exception {
+				ReducingState<Long> partitionedState = context.getPartitionedState(stateDescriptor);
+				Long removingTimestamp = partitionedState.get();
+				//watermark水位满了必须执行并清理
+				if (timestamp == window.maxTimestamp()){
+					//触发执行前需要移除之前的窗口，onElement时会再重新注册初始timer
+					Optional.ofNullable(removingTimestamp).ifPresent(context::deleteEventTimeTimer);
+					return TriggerResult.FIRE;
+				} else {
+					//刚好到达interval间隔的时间戳，时间窗口内的周期执行，注册下一个interval时间戳，同时执行
+					if (removingTimestamp != null && timestamp == removingTimestamp){
+						partitionedState.clear();
+						long nextPeriodEndTime = timestamp + interval;
+						partitionedState.add(nextPeriodEndTime);
+						context.registerEventTimeTimer(nextPeriodEndTime);
+						return TriggerResult.FIRE;
+					}else {
+						//会走到这里？
+						return TriggerResult.CONTINUE;
+					}
+				}
+			}
+			@Override //窗口状态merge的逻辑
+			public void onMerge(Window window, OnMergeContext context) throws Exception {
+				context.mergePartitionedState(stateDescriptor);
+				Long nextFireTimestamp = context.getPartitionedState(stateDescriptor).get();
+				Optional.ofNullable(nextFireTimestamp).ifPresent(context::registerEventTimeTimer);
+			}
+			@Override //窗口计算执行后的数据清理方法
+			public void clear(Window window, TriggerContext context) throws Exception {
+				context.deleteEventTimeTimer(window.maxTimestamp());
+				ReducingState<Long> fireTimestampState = context.getPartitionedState(stateDescriptor);
+				Optional.ofNullable(fireTimestampState.get()).ifPresent(item -> {
+					context.deleteEventTimeTimer(item);
+					fireTimestampState.clear();
+				});
+			}
+			@Override //用于SessionWindows的merge，指定为可以merge
+			public boolean canMerge() {
+				return true;
+			}
+		}
+
+		//Windows Function 的使用：窗口内的数据计算逻辑
+		static void aboutWindowsFunction(){
+			KeyedStream<PageEvent, String> keyedStream = pageEventDataSource.keyBy(PageEvent::getUserId);
+			WindowedStream<PageEvent, String, TimeWindow> window = keyedStream.window(SlidingEventTimeWindows.of(Time.minutes(30), Time.seconds(30)));
+			//Reduce Function: (T,T) -> T
+			window.reduce(new ReduceFunction<PageEvent>() {
+				@Override
+				public PageEvent reduce(PageEvent value1, PageEvent value2) throws Exception {
+					value1.setPageId(value1.getPageId()+","+value2.getPageId());
+					return value1;
+				}
+			});
+			//Aggregate Function: 对数据集中的字段求平均值
+			window.aggregate(new AggregateFunction<PageEvent/*item*/, Pair<Long,Long>/*accumulator*/, Long/*result*/>() {
+				@Override //总和初始值为0
+				public Pair<Long,Long> createAccumulator() {
+					return Pair.of(0L,0L);
+				}
+				@Override //accumulator聚合逻辑
+				public Pair<Long,Long> add(PageEvent value, Pair<Long,Long> accumulator) {
+					int add = value.getPageId().equals("shopping") ? 10 : 5;
+					long left = accumulator.getLeft() + 1;
+					long right = accumulator.getRight() + add;
+					return Pair.of(left, right);
+				}
+				@Override //聚合完成后的操作
+				public Long getResult(Pair<Long,Long> accumulator) {
+					return accumulator.getRight() / (accumulator.getLeft() == 0 ? 1 : accumulator.getLeft());
+				}
+				@Override //分区集群执行结果的合并
+				public Pair<Long,Long> merge(Pair<Long,Long> a, Pair<Long,Long> b) {
+					long left = a.getLeft() + b.getLeft();
+					long right = a.getRight() + b.getRight();
+					return Pair.of(left, right);
+				}
+			});
+			//ProcessWindow Function: 如果窗口内元素计算结果需要考虑窗口内的全部元素，就需要使用ProcessWindowFunction(尽量避免使用)
+			//需求描述：统计中位数和众数
+			window.process(new ProcessWindowFunction<PageEvent/*IN*/, String/*OUT*/, String/*Key*/, TimeWindow>() {
+				@Override
+				public void process(String key, Context context, Iterable<PageEvent> elements, Collector<String> out) throws Exception {
+					Map<String/*pageId*/, Integer/*count*/> map = new HashMap<>();
+					for (PageEvent element : elements) {
+						Integer count = map.computeIfAbsent(element.getPageId(), xxx -> 0);
+						count ++;
+						map.put(element.getPageId(), count);
+					}
+					//...
+					int result = 0;//max(map.value)
+					out.collect(key + result + context.window().getEnd());
+				}
+			});
+			//Incremental Aggregation 整合 ProcessWindowsFunction: 一次传两个函数
+			//需求描述：求窗口中指标最大值(pageId最长的)以及对应窗口的终止时间
+			window.reduce(new ReduceFunction<PageEvent>() {
+				@Override
+				public PageEvent reduce(PageEvent value1, PageEvent value2) throws Exception {
+					return value1.getPageId().length() > value2.getPageId().length() ? value1 : value2;
+				}
+			}, new ProcessWindowFunction<PageEvent, String, String, TimeWindow>() {
+				@Override
+				public void process(String s, Context context, Iterable<PageEvent> elements, Collector<String> out) throws Exception {
+					PageEvent next = elements.iterator().next();
+					out.collect(context.window().getEnd() +","+ next.getPageId());
+				}
+			});
+			//ProcessWindowFunction 针对指定的Key在窗口上存储
+			/*
+			需求描述：用户ID作为key，求每个用户ID最近1h的登录数，如果平台中一共有3000用户，则窗口计算会创建3000个窗口实例
+			每个窗口实例都会保存每个key的状态数据，可以通过ProcessWindowFunction中的Context对象获取并操作Per-window State数据
+			 */
+			window.process(new ProcessWindowFunction<PageEvent, String, String, TimeWindow>(){
+				@Override
+				public void process(String s, Context context, Iterable<PageEvent> elements, Collector<String> out) throws Exception {
+					//两种Per-window state的使用
+					context.globalState();
+					context.windowState();
+				}
+			});
+
 		}
 	}
 
