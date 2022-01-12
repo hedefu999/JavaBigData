@@ -2,6 +2,7 @@ package com.learning;
 
 import com.learning.pojos.PageEvent;
 import com.learning.pojos.Person;
+import com.learning.pojos.ViewEvent;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -57,6 +58,7 @@ import org.apache.flink.streaming.api.functions.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
+import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SocketClientSink;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
@@ -887,18 +889,30 @@ public class FlinkPrimaryAPI {
 	//多流合并计算
 	static class AbountStreamJoin{
 		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
+		static DataStreamSource<ViewEvent> viewEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.VIEWEVENTS);
 		/*
 		需求描述：有两个流，数据有重复，但字段部分重合，但key名称不一致，需要inner join一下，去除重复的，join成一个流统计下
 		 */
 		static void multiStream(){
-			KeyedStream<PageEvent, String> keyedStream1 = pageEventDataSource.keyBy(PageEvent::getUserId);
-			KeyedStream<PageEvent, String> keyedStream2 = pageEventDataSource.keyBy(PageEvent::getUserId);
-			keyedStream1.join(keyedStream2)
-					.where((KeySelector<PageEvent, String>) PageEvent::getUserId)
-					.equalTo((KeySelector<PageEvent, String>) PageEvent::getUserNo)
-					.window(TumblingEventTimeWindows.of(Time.minutes(1)))
-					.apply((JoinFunction<PageEvent, PageEvent, String>) (first, second) -> {
-						return first.getUserId()+first.getPageId()+":"+second.getUserNo()+second.getPageId();
+			KeyedStream<PageEvent, String> pageEventStream = pageEventDataSource.keyBy(PageEvent::getUserId);
+			KeyedStream<ViewEvent, String> viewEventStream = viewEventDataSource.keyBy(ViewEvent::getUserNo);
+			//滚动窗口关联,元素不会重复，内连接，关联不到就不输出
+			pageEventStream.join(viewEventStream)
+							.where(PageEvent::getUserId)
+							.equalTo(ViewEvent::getUserNo)
+							.window(TumblingEventTimeWindows.of(Time.seconds(10)))
+							.apply((page,view) -> new Tuple2(page.getUserId(),page.getPageId()+","+view.getPageId()));
+			//滑动窗口 window function 换成SlidingEventTimeWindows
+			//会话窗口关联 与此类似
+			//间隔关联
+			pageEventStream.intervalJoin(viewEventStream)
+					//每个pageEvent元素到达时间前2秒和后4秒之间到达的viewEvent被关联进来
+					.between(Time.seconds(2),Time.seconds(4))
+					.process(new ProcessJoinFunction<PageEvent, ViewEvent, String>() {
+						@Override
+						public void processElement(PageEvent left, ViewEvent right, Context ctx, Collector<String> out) throws Exception {
+							out.collect(ctx.getTimestamp()+":"+left.getPageId()+"-"+right.getPageId());
+						}
 					});
 		}
 
