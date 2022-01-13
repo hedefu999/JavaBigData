@@ -1,5 +1,6 @@
 package com.learning;
 
+import akka.dispatch.ExecutionContexts;
 import com.learning.pojos.PageEvent;
 import com.learning.pojos.Person;
 import com.learning.pojos.ViewEvent;
@@ -24,6 +25,7 @@ import org.apache.flink.api.common.functions.JoinFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
@@ -44,6 +46,7 @@ import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.runtime.concurrent.Executors;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.AllWindowedStream;
 import org.apache.flink.streaming.api.datastream.ConnectedStreams;
@@ -57,6 +60,8 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
+import org.apache.flink.streaming.api.functions.async.AsyncFunction;
+import org.apache.flink.streaming.api.functions.async.ResultFuture;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
@@ -88,6 +93,7 @@ import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.concurrent.ExecutionContext;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -916,6 +922,24 @@ public class FlinkPrimaryAPI {
 					});
 		}
 
+
+
+	}
+
+	//Flink有状态计算
+	static class StatefulCalculation{
+		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
+
+		//通过valueState计算最小值
+		static void valueState(){
+			pageEventDataSource.keyBy(PageEvent::getUserId)
+					.flatMap(new RichFlatMapFunction<PageEvent, Integer>() {
+						@Override
+						public void flatMap(PageEvent value, Collector<Integer> out) throws Exception {
+
+						}
+					});
+		}
 	}
 
 	public static void main(String[] args) throws Exception {
