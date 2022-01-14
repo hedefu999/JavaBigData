@@ -29,9 +29,16 @@ import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.api.common.state.KeyedStateStore;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.state.OperatorStateStore;
 import org.apache.flink.api.common.state.ReducingState;
 import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.StateDescriptor;
+import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
@@ -44,10 +51,16 @@ import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.io.CsvInputFormat;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.concurrent.Executors;
+import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.TimeCharacteristic;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
+import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.datastream.AllWindowedStream;
 import org.apache.flink.streaming.api.datastream.ConnectedStreams;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -55,6 +68,7 @@ import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.datastream.WindowedStream;
+import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.AscendingTimestampExtractor;
@@ -103,10 +117,13 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Skeleton for a Flink Streaming Job.
@@ -930,15 +947,148 @@ public class FlinkPrimaryAPI {
 	static class StatefulCalculation{
 		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
 
-		//通过valueState计算最小值
+		//[3304]需求描述：通过valueState计算最小值, ValueStat#value() 获取值；ValueStat#update() 修改值
 		static void valueState(){
 			pageEventDataSource.keyBy(PageEvent::getUserId)
-					.flatMap(new RichFlatMapFunction<PageEvent, Integer>() {
-						@Override
-						public void flatMap(PageEvent value, Collector<Integer> out) throws Exception {
+					.flatMap(new RichFlatMapFunction<PageEvent, Pair<String,Long>>() {
+						private ValueState<Long> minmumValueStat;
 
+						@Override
+						public void open(Configuration parameters) throws Exception {
+							//创建ValueStateDescriptor
+							ValueStateDescriptor<Long> minimumDescriptor = new ValueStateDescriptor<>("计算最小值", Long.class);
+							//通过RuntimeContext拿到Stat: todo RuntimeContext是怎么找到descriptor的？万一有多个Long类型的ValueStateDescriptor呢？？？
+							minmumValueStat = getRuntimeContext().getState(minimumDescriptor);
+							//getRuntimeContext().getReducingState(new ReducingStateDescriptor<?>(...))
+							//getRuntimeContext().getMapState(new MapStateDescriptor<String, Long>("用户1天的统计量",String.class, Long.class));
+						}
+						@Override
+						public void close() throws Exception {
+							//实现一个生命周期结束的close方法
+						}
+						@Override
+						public void flatMap(PageEvent input, Collector<Pair<String,Long>> out) throws Exception {
+							//获取当前最小值，进行更新
+							Long minmum = minmumValueStat.value();
+							if (input.getScore() > minmum){
+								out.collect(Pair.of(input.getUserId(), minmum));
+							}else {
+								minmumValueStat.update(input.getScore());
+								out.collect(Pair.of(input.getUserId(), input.getScore()));
+							}
 						}
 					});
+		}/*
+		-	RichXXXFunction与XXXFunctioon的区别：
+		Rich能够操作状态，继承了AbstractRichFunction获取了getRuntimeContext和getIterationRuntimeContext两个能力，可以操作State变量
+		-   上述操作状态变量的方式在scala api中的写法非常简洁
+		pageEventDataSource.keyBy(PageEvent::getUserId)后可以调 flatMapWithState获取状态，系统自动创建count对应的状态来存储每次更新的累加值
+
+		*/
+
+		//[3305]State生命周期: 同样需要使用Descriptor
+		static void stateTTL(){
+			StateTtlConfig stateTtlConfig = StateTtlConfig
+					//指定TTL时长
+					.newBuilder(org.apache.flink.api.common.time.Time.seconds(10))
+					/*
+					  指定TTL刷新策略只对创建和写入操作有效
+						StateTtlConfig.UpdateType 的介绍：
+						OnCreateAndWrite 创建和写入时更新TTL
+						OnReadAndWrite 比OnCreateAndWrite多一个，读取时也更新TTL
+						如果一个状态指标一直没有被使用，TTL一直不更新，导致未清理，导致系统中状态数据越来越多，此时可以考虑使用清理策略 cleanupFullSnapshot
+						但这个策略不适合用于RocksDB做增量Checkpointing操作
+					 */
+					.setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite).cleanupFullSnapshot()
+					/*
+					  指定状态可见性
+						StateTtlConfig.StateVisibility 枚举介绍
+						ReturnExpiredIfNotCleanedUp 状态数据即使过期但没有清理仍然返回
+						NeverReturnExpired 过期了就不返回
+					 */
+					.setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+					.build();
+			ValueStateDescriptor<Long> valueStateDescriptor = new ValueStateDescriptor<Long>("valueState生命周期", Long.class);
+			valueStateDescriptor.enableTimeToLive(stateTtlConfig);
+		}
+
+		//Managed Operator State
+		static void managedOperatorState(){
+			//通过CheckpointedFunction接口操作Operator State
+
+		}
+
+		//展示下Managed Operator State是如何使用的
+		//3306 需求描述：实现CheckpointedFunction接口利用Operator State统计输入到算子的数据量
+		static class CheckpointCount implements
+				FlatMapFunction<Tuple2<Integer,Long>, Tuple3<Integer,Long,Long>>,
+				CheckpointedFunction {
+			private Long count;
+			private ValueState<Long> valueState;
+			private ListState<Long> listState;
+			@Override
+			public void flatMap(Tuple2<Integer, Long> value, Collector<Tuple3<Integer, Long, Long>> out) throws Exception {
+				Long keyedCount = valueState.value() + 1;
+				valueState.update(keyedCount);
+				count++;
+				out.collect(Tuple3.of(value.f0, keyedCount, count));
+			}
+			//当发生snapshot时，将count添加到listState中
+			@Override
+			public void snapshotState(FunctionSnapshotContext context) throws Exception {
+				//清理掉上一次checkpoint中存储的operatorState的数据
+				listState.clear();
+				//添加并更新本次算子中需要创建checkpoint的operatorCount状态变量
+				listState.add(count);
+			}
+			//系统重启时会调用这里的initializeState方法，重新恢复keyedState和OperatorState状态变量
+			@Override
+			public void initializeState(FunctionInitializationContext context) throws Exception {
+				//从context中拿ValueState
+				KeyedStateStore keyedStateStore = context.getKeyedStateStore();
+				ValueStateDescriptor<Long> valueStateDescriptor =
+						new ValueStateDescriptor<Long>("KeyedStateDestor",TypeInformation.of(Long.class));
+				valueState = keyedStateStore.getState(valueStateDescriptor);
+				//从context中拿ListState
+				OperatorStateStore operatorStateStore = context.getOperatorStateStore();
+				ListStateDescriptor<Long> operatorStateDestor =
+						new ListStateDescriptor<>("OperatorStateDestor", TypeInformation.of(Long.class));
+				/*
+				对于ListState数据有一个恢复时的分区重分布策略 [3307]
+				getListState表示采用默认的 Even-split Redistribution策略
+				如果要使用 Union Redistribution 策略，可以通过getUnionListState来获取
+				 */
+				listState = operatorStateStore.getListState(operatorStateDestor);
+				//定义在restore过程中，从listState中恢复数据的逻辑
+				if (context.isRestored()){
+					Iterator<Long> iterator = listState.get().iterator();
+					Long countRestore = 0L;
+					while (iterator.hasNext()){
+						countRestore += iterator.next();
+					}
+					count = countRestore;
+				}
+			}
+		}
+
+		// 需求描述，上面是实现了 CheckpointedFunction 操作了Operator State
+		//如何通过 ListCheckpointed 操作 Operator State
+		//ListCheckpointed 已废弃，官方认为应使用本就很少使用的CheckpointedFunction
+
+		static void checkpoint(){
+			streamEnv.enableCheckpointing(1000);
+			CheckpointConfig checkpointConfig = streamEnv.getCheckpointConfig();
+			checkpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+			//处理Checkpoint的超时时间，超过时会中断Checkpoint过程，默认10分钟
+			checkpointConfig.setCheckpointTimeout(60000);
+			//设置两个checkpoint之间的最小时间间隔，防止出现状态数据过大checkpoint执行时间过长，导致Checkpoint积压过多，最终Flink密集触发Checkpoint操作
+			checkpointConfig.setMinPauseBetweenCheckpoints(500);
+			//设置最大并行执行的检查点数量，默认1个
+			checkpointConfig.setMaxConcurrentCheckpoints(1);
+			//设置周期性的外部检查点，将状态数据持久化到外部系统中，这种方式不会在任务停止的过程中清理掉检查点数据，而是保存到外部系统介质中
+			checkpointConfig.enableExternalizedCheckpoints(
+					CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+			checkpointConfig.setTolerableCheckpointFailureNumber(5);
 		}
 	}
 

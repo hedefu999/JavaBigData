@@ -17,12 +17,14 @@ public class PageEvent {
     private String pageId;
     private long timestamp;
     private String operationType;
+    private long score;
 
-    public static PageEvent createPageEvent(String userId, String pageId, String time,String operationType){
+    public static PageEvent createPageEvent(String userId, String pageId, String time,String operationType, long score){
         PageEvent pageEvent = new PageEvent();
         pageEvent.setUserId(userId);
         pageEvent.setPageId(pageId);
         pageEvent.setOperationType(operationType);
+        pageEvent.setScore(score);
         long epochSecond = LocalDateTime.parse(time, dateTimeFormatter).atZone(ZoneId.systemDefault()).toInstant().getEpochSecond();
         pageEvent.setTimestamp(epochSecond);
         return pageEvent;
