@@ -52,6 +52,7 @@ import org.apache.flink.api.java.io.CsvInputFormat;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.concurrent.Executors;
@@ -957,6 +958,8 @@ public class FlinkPrimaryAPI {
 						public void open(Configuration parameters) throws Exception {
 							//创建ValueStateDescriptor
 							ValueStateDescriptor<Long> minimumDescriptor = new ValueStateDescriptor<>("计算最小值", Long.class);
+							//Querable State 将状态变量暴露出来允许业务系统查询 [3305]
+							minimumDescriptor.setQueryable("minmum_querable_state");
 							//通过RuntimeContext拿到Stat: todo RuntimeContext是怎么找到descriptor的？万一有多个Long类型的ValueStateDescriptor呢？？？
 							minmumValueStat = getRuntimeContext().getState(minimumDescriptor);
 							//getRuntimeContext().getReducingState(new ReducingStateDescriptor<?>(...))
@@ -1010,12 +1013,6 @@ public class FlinkPrimaryAPI {
 					.build();
 			ValueStateDescriptor<Long> valueStateDescriptor = new ValueStateDescriptor<Long>("valueState生命周期", Long.class);
 			valueStateDescriptor.enableTimeToLive(stateTtlConfig);
-		}
-
-		//Managed Operator State
-		static void managedOperatorState(){
-			//通过CheckpointedFunction接口操作Operator State
-
 		}
 
 		//展示下Managed Operator State是如何使用的
@@ -1089,6 +1086,24 @@ public class FlinkPrimaryAPI {
 			checkpointConfig.enableExternalizedCheckpoints(
 					CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
 			checkpointConfig.setTolerableCheckpointFailureNumber(5);
+		}
+
+		static void querableState() {
+			SingleOutputStreamOperator<Tuple2<String, Long>> operator = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS)
+					.map(item -> new Tuple2<String, Long>(item.getUserId(), item.getScore()))
+					.keyBy(item -> item.f0)
+					.window(TumblingEventTimeWindows.of(Time.seconds(5)))
+					.max("f1");
+			operator.keyBy(item -> item.f0).asQueryableState("maxInputState");
+			//DataStream API设置 QuerableState 后将不能再接入后续DataSink
+
+			//DataStream 结合 ValueStateDescriptor 设置querable state
+			TypeInformation<Tuple2<String, Long>> typeInforTuple2 = TypeInformation.of(new TypeHint<Tuple2<String, Long>>() {
+			});
+			TupleTypeInfo<Tuple> tupleTypeInfo = TupleTypeInfo.getBasicAndBasicValueTupleTypeInfo(String.class, Long.class);
+			operator.keyBy(item -> item.f0).asQueryableState("maxInputState",
+					new ValueStateDescriptor<Tuple2<String, Long>>("maxInputState", typeInforTuple2)
+			);
 		}
 	}
 
