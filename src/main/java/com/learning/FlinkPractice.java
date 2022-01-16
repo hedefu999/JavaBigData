@@ -5,18 +5,26 @@ import org.apache.commons.lang3.time.DateFormatUtils;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.KeyedStateStore;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.io.CsvInputFormat;
 import org.apache.flink.api.java.io.PojoCsvInputFormat;
 import org.apache.flink.api.java.io.RowCsvInputFormat;
 import org.apache.flink.api.java.io.TupleCsvInputFormat;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.typeutils.PojoField;
 import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
@@ -24,14 +32,17 @@ import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
+import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.functions.windowing.RichProcessWindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.EventTimeSessionWindows;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.triggers.ContinuousEventTimeTrigger;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
@@ -118,7 +129,7 @@ public class FlinkPractice {
                 .keyBy(MarsMobilePage4AScore::getVipruid);
         return keyedStream;
     }
-
+    //为避免数据重复，窗口计算只能使用 Tumbling/Session Window
     // SessionWindow + aggregate
     static DataStream<Tuple3<Long,Long,Long>> aggregateOperator(KeyedStream<MarsMobilePage4AScore, Long> keyedStream){
         SingleOutputStreamOperator<Tuple3<Long,Long, Long>> operator = keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(10)))
@@ -187,25 +198,14 @@ public class FlinkPractice {
         return operator;
     }
     /*-=-=-=-=-= 上述测试基于EventTime指定字段的时间单位为秒错误，许多结论错误 =-=-=-=-=-=-=-=-=*/
-
-
-
-    public static void main(String[] args) throws Exception{
-        KeyedStream<MarsMobilePage4AScore, Long> keyedStream = getKeyedStream();
-        //DataStream<MarsMobilePage4AScore> operator = aggregateOperator(keyedStream);
-
-        //迟到的数据不能丢弃，计算次数要考虑进去，但计算页面停留时长应排除影响
-        //为避免数据重复，窗口计算只能使用 Tumbling/Session Window
-        //trigger可以指定窗口计算的触发时机:ContinuousEventTimeTrigger
-        //evctor 还用不上，filter足够了
-
-        //迟到的数据能进入窗口吗？（可能要在流式数据中测试，批式的看到数据进来了）
+    //迟到的数据能进入窗口吗？（可能要在流式数据中测试，批式的看到数据进来了 todo 在流式数据中调试 侧输出效果 是否能将迟到元素累加上去，修正结果）
+    static SingleOutputStreamOperator<Object> tumblingWindowAndContinuousTrigger(KeyedStream<MarsMobilePage4AScore, Long> keyedStream){
         //时间窗口设置大一点能有更多元素进入process方法
-        //时间窗口设置8秒，触发器说2秒计算一次，就会导致
+        //时间窗口设置8秒，触发器说2秒计算一次，就会导致重复触发窗口计算，在窗口较长，而又需要尽快更新数据的情况下使用
         SingleOutputStreamOperator<Object> operator = keyedStream.window(TumblingEventTimeWindows.of(Time.seconds(80)))
                 //时间窗口写80，不是说EventTime相差不到80秒就能在一个窗口里，80仅是窗口宽度，至于窗口开始时间怎么确定的（从10秒开始还是从0秒开始，待研究）
                 //触发器指定的时长指两个EventTime相差超过40秒就会触发窗口计算，
-                //观测到如果两个元素被倒序了，即使已经差40秒（-40秒），不会触发窗口计算
+                //观测到如果两个元素被倒序了，即使已经差40秒（-40秒），不会触发窗口计算，而窗口内的元素顺序是无法保证的，这样这个trigger特性就是概率性的。。。
                 .trigger(ContinuousEventTimeTrigger.of(Time.seconds(40)))
                 .allowedLateness(Time.seconds(0))
                 .process(new ProcessWindowFunction<MarsMobilePage4AScore, Object, Long, TimeWindow>() {
@@ -225,9 +225,80 @@ public class FlinkPractice {
                         }
                     }
                 });
+        return operator;
+    }
 
 
-        operator.addSink(new PrintSinkFunction<>("一只松鼠", true));
+    //todo 1天失效是创建之时开始，还是固定0点？ 设置2分钟失效，能否观测到失效？需要在流式数据测试中调试
+     //MapStat中维护大量数据
+     public static final String pageOnTimeCnt = "pageOnTimeCnt";// - 最简单的计数
+     public static final String spxqyPageOnCnt = "spxqyPageOnCnt";// - 条件简单计数
+     public static final String pageTypeCnt = "pageTypeCnt";// - 历史枚举计数
+     public static final String pageOnTimeSum = "pageOnTimeSum";// - 简单interval累计
+     public static final String activityPageOnTime = "activityPageOnTime";// - 条件interval累计
+
+    public static void main(String[] args) throws Exception{
+        KeyedStream<MarsMobilePage4AScore, Long> keyedStream = getKeyedStream();
+        //DataStream<MarsMobilePage4AScore> operator = aggregateOperator(keyedStream);
+
+        //迟到的数据不能丢弃，计算次数要考虑进去，但计算页面停留时长应排除影响
+        //evctor 还用不上，filter足够了
+        //是不是可以一个keyStream分别走两条流水线，一个计算次数，一个计算时长？？？
+
+        //有状态计算：准备从RuntimeContext中拿到上下文变量
+        MapStateDescriptor<String, Long> descriptor =
+                new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
+        StateTtlConfig ttlConfig = StateTtlConfig.newBuilder(org.apache.flink.api.common.time.Time.days(1))
+                .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
+                .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+                .build();
+        descriptor.enableTimeToLive(ttlConfig);
+
+        SingleOutputStreamOperator<Tuple2<String, Long>> operator = keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(90)))
+                .trigger(ContinuousEventTimeTrigger.of(Time.seconds(2)))
+                .process(new ProcessWindowFunction<MarsMobilePage4AScore, Tuple2<String, Long>, Long, TimeWindow>() {
+                    private MapState<String, Long> statistics;
+                    @Override
+                    public void process(Long key, Context context, Iterable<MarsMobilePage4AScore> elements, Collector<Tuple2<String, Long>> out) throws Exception {
+                        MapState<String, Long> mapState = context.globalState().getMapState(descriptor);
+                        statistics.put("userId",key);
+                        if (key == 102){
+                            statistics.put("102",(long)"helloflink".length());
+                            out.collect(new Tuple2<String,Long>("这是102输出结果",key));
+                            mapState.put("这是102输出结果",key);
+                        }else {
+                            statistics.put("10x",2333L);
+                            out.collect(new Tuple2<String,Long>("这是10x输出结果",key));
+                            mapState.put("这是10x输出结果",key);
+                        }
+                    }
+
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        logger.info("松鼠：open and get stat from context");
+                        RuntimeContext runtimeContext = getRuntimeContext();
+                        statistics = runtimeContext.getMapState(descriptor);
+                    }
+
+                    @Override
+                    public void close() throws Exception {
+                        logger.info("松鼠：trigger close method");
+                    }
+                });
+        //用上有状态计算后啥东西都变得Rich了
+        operator.addSink(new RichSinkFunction<Tuple2<String, Long>>() {
+            @Override
+            public void invoke(Tuple2<String, Long> value, Context context) throws Exception {
+                RuntimeContext runtimeContext = getRuntimeContext();
+                MapState<String, Long> mapState = runtimeContext.getMapState(descriptor);//todo 空指针，Sink中拿不到
+                logger.info("松鼠：context在Sink中：timestamp={},curWaterMK={},curProsTime={}",
+                        context.timestamp(),context.currentWatermark(),context.currentProcessingTime());
+                logger.info("松鼠：tuple={}", value);
+                StringBuilder builder = new StringBuilder();
+                mapState.iterator().forEachRemaining(item -> builder.append(item.getKey() + item.getKey()).append("\n,"));
+                logger.info("松鼠：看看能不能拿到状态变量：{}", builder.toString());
+            }
+        });
 
 
 
