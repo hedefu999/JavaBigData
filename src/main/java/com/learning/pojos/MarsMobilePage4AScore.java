@@ -9,7 +9,7 @@ import java.time.format.DateTimeFormatter;
 
 @Data
 public class MarsMobilePage4AScore {
-    private static final DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+    public static final DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     /*
     页面埋点编码，用离线名称，解析的为page字段的值,页面类型,可通过关联vipdm.dim_log_app_page_type_config获取页面名称
     (建议使用精简表 vipdm.dim_log_app_page_type https://vipdata.vip.vip.com/new/vipmeta/tableDetail?tableName=vipdm.dim_log_app_page_type&dataType=TABLE&tab=model)
@@ -33,7 +33,10 @@ public class MarsMobilePage4AScore {
         score.setSessionId(vipruid+startTime);
         score.setVipruid(vipruid);
         long epochSecond = LocalDateTime.parse(startTime, dateTimeFormatter).atZone(ZoneId.systemDefault()).toInstant().getEpochSecond();
-        score.setPageStartTime(epochSecond);
+        //这个字段被指定为Flink的EventTime，long值必须以毫秒为单位，否则会出现窗口时长指定2秒变成2000秒的奇怪问题
+        //而且改对后窗口在批式处理时窗口也正确的变成多个，而且数据也变成有序了！！！相当长时间的本地调试都是基于这个错误的时间戳上，惨
+        //todo 设置watermark时注意timestamp字段时毫秒
+        score.setPageStartTime(epochSecond*1000);
         return score;
     }
 }

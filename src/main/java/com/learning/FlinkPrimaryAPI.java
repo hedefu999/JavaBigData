@@ -1,6 +1,5 @@
 package com.learning;
 
-import akka.dispatch.ExecutionContexts;
 import com.learning.pojos.PageEvent;
 import com.learning.pojos.Person;
 import com.learning.pojos.ViewEvent;
@@ -9,19 +8,10 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.flink.api.common.ExecutionConfig;
-import org.apache.flink.api.common.eventtime.AscendingTimestampsWatermarks;
-import org.apache.flink.api.common.eventtime.BoundedOutOfOrdernessWatermarks;
-import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
-import org.apache.flink.api.common.eventtime.TimestampAssigner;
-import org.apache.flink.api.common.eventtime.TimestampAssignerSupplier;
-import org.apache.flink.api.common.eventtime.WatermarkGenerator;
-import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
-import org.apache.flink.api.common.eventtime.WatermarkOutput;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.FlatMapFunction;
-import org.apache.flink.api.common.functions.JoinFunction;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.ReduceFunction;
@@ -44,8 +34,6 @@ import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.io.CsvInputFormat;
@@ -55,14 +43,11 @@ import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
-import org.apache.flink.runtime.concurrent.Executors;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
-import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
-import org.apache.flink.streaming.api.datastream.AllWindowedStream;
 import org.apache.flink.streaming.api.datastream.ConnectedStreams;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
@@ -75,8 +60,6 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
-import org.apache.flink.streaming.api.functions.async.AsyncFunction;
-import org.apache.flink.streaming.api.functions.async.ResultFuture;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
@@ -93,7 +76,6 @@ import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
 import org.apache.flink.streaming.api.windowing.assigners.SessionWindowTimeGapExtractor;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
-import org.apache.flink.streaming.api.windowing.assigners.WindowAssigner;
 import org.apache.flink.streaming.api.windowing.evictors.DeltaEvictor;
 import org.apache.flink.streaming.api.windowing.evictors.Evictor;
 import org.apache.flink.streaming.api.windowing.time.Time;
@@ -103,38 +85,23 @@ import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
-import org.apache.flink.types.Value;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.concurrent.ExecutionContext;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.lang.reflect.Type;
-import java.nio.channels.SelectionKey;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
-/**
- * Skeleton for a Flink Streaming Job.
- *
- * <p>For a tutorial how to write a Flink streaming application, check the
- * tutorials and examples on the <a href="https://flink.apache.org/docs/stable/">Flink Website</a>.
- *
- * <p>If you change the name of the main class (with the public static void main(String[] args))
- * method, change the respective entry in the POM.xml file (simply search for 'mainClass').
- */
 public class FlinkPrimaryAPI {
 	static Logger logger = LoggerFactory.getLogger("StreamingJob");
 	static StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -275,17 +242,14 @@ public class FlinkPrimaryAPI {
 				public <T> T getField(int pos) {
 					return null;
 				}
-
 				@Override
 				public <T> void setField(T value, int pos) {
 
 				}
-
 				@Override
 				public int getArity() {
 					return 0;
 				}
-
 				@Override
 				public <T extends Tuple> T copy() {
 					return null;
@@ -300,7 +264,7 @@ public class FlinkPrimaryAPI {
 				public void flatMap(String value, Collector<Integer> out) throws Exception {
 					//...
 				}
-			}).returns(new TypeHint<Integer>() {});//通过returns方法指定返回类型参数？？？不知啥用途
+			}).returns(new TypeHint<Integer>() {});//通过returns方法指定返回类型参数
 		}
 		/*
 		 自定义TypeInformation：TypeInfoFactory的使用
@@ -323,7 +287,7 @@ public class FlinkPrimaryAPI {
 	}
 
 	/**
-	 * 研究下大名鼎鼎的 # DataStream API
+	 * # DataStream API
 	 */
 	static class DataStreamAPI{
 		//## 内置数据源
@@ -341,14 +305,10 @@ public class FlinkPrimaryAPI {
 						logger.info("fileRecord: s = {}, objects = {}",s,objects.length);
 						return null;
 					}
-				};
+				};//CsvInputFormat 使用 readFile 写法报错
 				//DataStreamSource<String> source1 = streamEnv.readFile(csvInputFormat, csvFilePath);
 				DataStreamSource<String> csvSource = streamEnv.readFile(csvInputFormat, csvFilePath,
 						FileProcessingMode.PROCESS_ONCE,1000/*ms*/);
-				/*
-				WatchType分为:PROCESS_CONTINUOUSLY - 一旦检测到文件发生变化，Flink会将该文件全部内容加载到Flink系统中；
-							PROCESS_ONCE - 只会将变化的内容送入Flink，可以保证数据的Exactly Once特性
-				 */
 				csvSource.setParallelism(1).print("csv_sink_no_8362");
 			}
 			//### socket 数据源,发送端如何设计
@@ -491,7 +451,7 @@ public class FlinkPrimaryAPI {
 	}
 
 	/**
-	 * 更出名的：# 时间概念与Watermark
+	 * # 时间概念与Watermark
 	 */
 	static class TimeCharacteristicAndWatermark{
 		//新版flink默认就是EventTime，不需要改了
@@ -580,7 +540,7 @@ public class FlinkPrimaryAPI {
 				@Nullable
 				@Override //决定是否使用水位机制,flink会先调用extractTimestamp方法，返回结果传入此方法决定是否使用watermark
 				public Watermark checkAndGetNextWatermark(PageEvent lastElement, long extractedTimestamp) {
-					return lastElement.getUserId().contains("黑名单")?new Watermark(extractedTimestamp):null;
+					return lastElement.getUserId().contains("in balcklist")?new Watermark(extractedTimestamp):null;
 				}
 			}; //过期
 			//自定义watermarks生成策略，上面两个API过期了，1.13.5使用这一个 https://blog.csdn.net/Vector97/article/details/110150925
@@ -597,7 +557,7 @@ public class FlinkPrimaryAPI {
 	}
 
 	/**
-	 * 终极特性： # window窗口计算
+	 * # window窗口计算
 	 */
 	static class AboutWindowsCalculator{
 		static DataStreamSource<PageEvent> pageEventDataSource = streamEnv.fromCollection(FlinkSourceDataUtils.PAGEEVENTS);
