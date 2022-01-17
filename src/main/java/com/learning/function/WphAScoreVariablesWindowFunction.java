@@ -25,6 +25,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoField;
 import java.time.temporal.TemporalField;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -33,9 +34,10 @@ import java.util.stream.StreamSupport;
 
 public class WphAScoreVariablesWindowFunction extends ProcessWindowFunction<MarsMobilePage4AScore, AScoreVariablesResult, Long, TimeWindow> {
     private final Logger logger = LoggerFactory.getLogger(this.getClass().getSimpleName());
-    public static final HashSet<Long> FAKE_ORDERS_PAGE_IDS = Sets.newHashSet(12L, 26L);
+
+    public static final HashSet<Long> FAKE_ORDERS_PAGE_IDS = Sets.newHashSet(14L,20L,26L);
     //有状态计算：准备从RuntimeContext中拿到上下文变量（注意如果MapState#get找不到，返回默认值是null，这个在MapStateDescriptor中写死了）
-    static MapStateDescriptor<String, Long> descriptor = new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
+    //static MapStateDescriptor<String, Long> descriptor = new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
     //todo 其他 KeyedStateDescriptor 要写一下
     static StateTtlConfig ttlConfig = StateTtlConfig
             //todo 这个有效时间可以自动清空状态变量？？？
@@ -49,18 +51,11 @@ public class WphAScoreVariablesWindowFunction extends ProcessWindowFunction<Mars
     static ValueStateDescriptor<List<Long>> pageIdValueStateDescriptor =
             new ValueStateDescriptor<List<Long>>("page_id"+"20210101", TypeInformation.of(new TypeHint<List<Long>>() {}));
     static {
-        descriptor.enableTimeToLive(ttlConfig);
         pageIdValueStateDescriptor.enableTimeToLive(ttlConfig);
         pageTypeValueStateDescriptor.enableTimeToLive(ttlConfig);
     }
-    /**
-     MapState中保存的变量：
-     - 用户访问过的 pageType\pageId
-     */
-    private MapState<String, Long> statistics;
-    private ListState<String> pageTypeListState;
+
     //当天浏览过的pageType状态变量
-    private ListState<String> pageTypesState;
     private ValueState<HashSet<String>> pageTypeValueState;
     private ValueState<List<Long>> pageIdValueState;
     @Override
@@ -69,41 +64,61 @@ public class WphAScoreVariablesWindowFunction extends ProcessWindowFunction<Mars
 
         AScoreVariablesResult statistics = new AScoreVariablesResult();
         statistics.setUserId(key);
-
-        //使用SessionWindow计算简版的page_on_time
+        //在一个窗口中计算 pageOneTime 需要先排序
         List<MarsMobilePage4AScore> sortedElements = StreamSupport.stream(elements.spliterator(), false).sorted().collect(Collectors.toList());
+
         HashSet<String> pageTypes = pageTypeValueState.value();
-        //
+        List<Long> pageIds = pageIdValueState.value();
+        if (pageIds == null){
+            logger.info("initializing pageIdValueState");
+            pageIds = new ArrayList<>();
+        }
+        if (pageTypes == null){
+            logger.info("initializing pageTypeValueState");
+            pageTypes = new HashSet<>();
+        }
         HashSet<String> newPageTypes = new HashSet<>();
+        List<Long> newPageIds = new ArrayList<>();
         int size = sortedElements.size();
         if (size == 0) {
             out.collect(statistics);
             return;
         }
+        //对有序的元素进行业务统计
         for (int i = 0; i < size; i++) {
             MarsMobilePage4AScore item = sortedElements.get(i);
             //1. 这个变量很简单那
             statistics.pageOnTimeCnt ++;
             //2. 加个条件
-            if ("page_commodity_detail".equals(item.getPageType())){
+            if ("page_commodity_detail".equals(item.pageType)){
                 statistics.spxqyPageOnCnt ++;
             }
             //3. 要使用Keyed State
-            if (! pageTypes.contains(item.getPageType()) && ! newPageTypes.contains(item.getPageType())){
+            if (! pageTypes.contains(item.pageType) && ! newPageTypes.contains(item.pageType)){
                 statistics.pageTypeCnt ++;
-                //窗口中的元素之间也有可能重复
-                newPageTypes.add(item.getPageType());
+                newPageTypes.add(item.pageType);//窗口中的元素之间也有可能重复
             }
             //4. 最复杂的，要做两次遍历，先准备数据
             //page_on_time 的计算办法与批处理类似,缺点：一个窗口的最后一个Page日志无法计算页面停留时长 todo check 目前先忽略吧
             if (i != size - 1){
-                item.pageOnTime = sortedElements.get(i+1).getPageStartTime() - item.getPageStartTime();
+                item.pageOnTime = sortedElements.get(i+1).pageStartTime - item.pageStartTime;
+            } else {
+                //todo 最后一个item的page_on_time 无法计算，干脆就用window结尾轧差了，这种计算方式在SesssionWindow下就是SessionGap,在TumblingWindow下值很随机
+                item.pageOnTime = context.window().getEnd() - item.pageStartTime;
+                logger.info("last item {} in window {} page_on_time was specified as {}",key, context.window().getEnd(),item.pageOnTime);
             }
-            //todo 真不行拿窗口结尾作为最后一个页面的退出时间 context.window().getEnd() 还是固定90s？？
             //5. 浏览页面不重复id数
-
-
+            if (!pageIds.contains(item.pageId) && !newPageIds.contains(item.pageId)){
+                statistics.pageNameCnt ++;
+                newPageIds.add(item.pageId);
+            }
         }
+        //及时更新状态变量 pageType\pageId集合 给同key的下一个窗口使用
+        pageTypes.addAll(newPageTypes);
+        pageTypeValueState.update(pageTypes);
+        pageIds.addAll(newPageIds);
+        pageIdValueState.update(pageIds);
+
         //6. 总浏览时长好算
         statistics.pageOnTimeSum = sortedElements.get(sortedElements.size() - 1).pageStartTime - sortedElements.get(0).pageStartTime;
         for (MarsMobilePage4AScore item : sortedElements){
@@ -129,23 +144,22 @@ public class WphAScoreVariablesWindowFunction extends ProcessWindowFunction<Mars
                 statistics.hour610PageOnTime += item.pageOnTime;
             }
         }
-        //更新pageType集合给同key的下一个窗口使用
-        pageTypes.addAll(newPageTypes);
-        pageTypeValueState.update(pageTypes);
-
-
+        //计算完别忘了收集起来
+        out.collect(statistics);
     }
 
     @Override
     public void open(Configuration parameters) throws Exception {
         //logger.info("松鼠：open and get stat from context"); //调用16次
         RuntimeContext runtimeContext = getRuntimeContext();
-        statistics = runtimeContext.getMapState(descriptor);
+        pageIdValueState = runtimeContext.getState(pageIdValueStateDescriptor);
+        pageTypeValueState = runtimeContext.getState(pageTypeValueStateDescriptor);
     }
 
     @Override
     public void close() throws Exception {
         //logger.info("松鼠：trigger close method"); //11条数据调用16次
+        //不使用 per-window state 就不要实现clear方法
     }
 
 }

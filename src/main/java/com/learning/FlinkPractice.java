@@ -1,5 +1,6 @@
 package com.learning;
 
+import com.learning.function.WphAScoreVariablesWindowFunction;
 import com.learning.pojos.AScoreVariablesResult;
 import com.learning.pojos.MarsMobilePage4AScore;
 import org.apache.commons.lang3.time.DateFormatUtils;
@@ -104,7 +105,7 @@ public class FlinkPractice {
 
     //使用 RowCsvInputFormat 读取 CSV 文件
     static DataStreamSource<Row> getRowCsvInputFormat(Path path, FileProcessingMode processMode){
-        TypeInformation[] typeInfos = {TypeInformation.of(String.class),TypeInformation.of(Long.class),TypeInformation.of(Long.class),TypeInformation.of(String.class)};
+        TypeInformation[] typeInfos = {TypeInformation.of(Long.class),TypeInformation.of(String.class),TypeInformation.of(Long.class),TypeInformation.of(String.class)};
         CsvInputFormat<Row> csvInputFormat = new RowCsvInputFormat(path,typeInfos);
         csvInputFormat.setSkipFirstLineAsHeader(false);
         return streamEnv.readFile(csvInputFormat, path.getPath(), processMode, 9000L);
@@ -117,10 +118,11 @@ public class FlinkPractice {
         //设置并行度
         //streamSource.setParallelism(3);
         SingleOutputStreamOperator<MarsMobilePage4AScore> dtoOperator = streamSource.map(input -> {
-            String pageType = input.<String>getFieldAs(0);
-            Long pageId = input.<Long>getFieldAs(1);
-            Long userId = input.<Long>getFieldAs(2);
-            String startTime = input.<String>getFieldAs(3);
+            //这里字段的映射与 CsvInputFormat 使用的 TypeInformation[] 一致
+            Long userId = input.<Long>getFieldAs(0);
+            String startTime = input.<String>getFieldAs(1);
+            Long pageId = input.<Long>getFieldAs(2);
+            String pageType = input.<String>getFieldAs(3);
             return MarsMobilePage4AScore.create(pageType, pageId, userId, startTime);
         }).uid("whatthefuck1");
 
@@ -316,18 +318,10 @@ public class FlinkPractice {
         //evctor 还用不上，filter足够了
         //是不是可以一个keyStream分别走两条流水线，一个计算次数，一个计算时长？？？
 
-        SingleOutputStreamOperator<AScoreVariablesResult> operator = keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(30)))
-                .apply(new WindowFunction<MarsMobilePage4AScore, AScoreVariablesResult, Long, TimeWindow>() {
-                    @Override
-                    public void apply(Long key, TimeWindow window, Iterable<MarsMobilePage4AScore> input, Collector<AScoreVariablesResult> out) throws Exception {
-                        if (key == 102) {
-                            logger.info("trigger window: size = {}", Iterables.size(input));
-                        }
-                        AScoreVariablesResult result = new AScoreVariablesResult();
-                        result.setUserId(key);
-                        out.collect(result);
-                    }
-                });
+        SingleOutputStreamOperator<AScoreVariablesResult> operator =
+                keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(30)))
+                        //todo 如果使用了触发器提升计算的实时性，重复触发了咋办？
+                .process(new WphAScoreVariablesWindowFunction());
         /**
          * WindowStream 直接去用 RichSinkFunction 拿状态变量会报 Keyed state can only be used on a 'keyed stream', i.e., after a 'keyBy()' operation.
          * 只能在 KeyedStream add 的 RichSinkFunction 中取变量
@@ -343,8 +337,6 @@ public class FlinkPractice {
                 logger.info("松鼠：tuple={}", value);
             }
         });
-
-
         streamEnv.execute("ascores");
     }
 }

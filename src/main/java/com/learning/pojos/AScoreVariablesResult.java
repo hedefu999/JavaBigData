@@ -12,7 +12,7 @@ public class AScoreVariablesResult {
     public long pageOnTimeCnt;
     //商详页浏览页面数：累加 page_type='page_commodity_detail' 的消息总数（以1ds表中的数量为准）;
     public long spxqyPageOnCnt;
-    //浏览页面大类数
+    //当天浏览页面id数：当天消息体中 distinct page_id 的总数
     public long pageNameCnt;
 
     //累计时长类
