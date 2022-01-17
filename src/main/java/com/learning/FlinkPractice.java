@@ -1,5 +1,6 @@
 package com.learning;
 
+import com.learning.pojos.AScoreVariablesResult;
 import com.learning.pojos.MarsMobilePage4AScore;
 import org.apache.commons.lang3.time.DateFormatUtils;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -12,6 +13,8 @@ import org.apache.flink.api.common.state.KeyedStateStore;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.io.CsvInputFormat;
@@ -26,6 +29,7 @@ import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.shaded.guava18.com.google.common.collect.Iterables;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
@@ -37,6 +41,7 @@ import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.functions.windowing.RichProcessWindowFunction;
+import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.EventTimeSessionWindows;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
@@ -64,6 +69,8 @@ public class FlinkPractice {
     static Logger logger = LoggerFactory.getLogger("FlinkPractice");
     public static final String timepatrn = "yyyyMMddHHmmss";
     static StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+    //todo test
+    //static StreamExecutionEnvironment webStreamEnv = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(new Configuration());
     static URL csvResource = FlinkPractice.class.getResource("/file/mars_mobile_page.csv");
     //运行出错
     static void howToPojoCsvInputFormat(Path path) throws Exception{
@@ -119,7 +126,7 @@ public class FlinkPractice {
 
         //新版Flink API 使用的WaterMark API
         WatermarkStrategy<MarsMobilePage4AScore> watermarkStrategy =
-                WatermarkStrategy.<MarsMobilePage4AScore>forBoundedOutOfOrderness(Duration.ofSeconds(5)) //乱序数据考虑的最大时长(再晚来就不要了)
+                WatermarkStrategy.<MarsMobilePage4AScore>forBoundedOutOfOrderness(Duration.ofSeconds(5)) //乱序数据考虑的最大时长(再晚来就不要了)todo 两秒触发后这个迟到策略还有用？)
                 //.withIdleness(Duration.ofSeconds(100)) //流数据不产生进入闲置状态的超时时长，优化性能
                 .withTimestampAssigner((event,timestamp) -> event.getPageStartTime()); //使用SerializableTimestampAssigner通过labmda表达式指定时间戳字段，另一个TimestampAssignerSupplier是通过context方式，接入metricbeats可能用的到
 
@@ -213,7 +220,7 @@ public class FlinkPractice {
                     public void process(Long key, Context context, Iterable<MarsMobilePage4AScore> elements, Collector<Object> out) throws Exception {
                         if (key == 101){
                             TimeWindow window = context.window();
-                            //window的maxTimestamp 不是当前窗口中出现的最大EventTime，而是window.getEnd()-1s
+                            //关于window中的几个变量：window的maxTimestamp 不是当前窗口中出现的最大EventTime，而是window.getEnd()-1s
                             logger.info("松鼠：start-{}, window.start = {}. window.maxts = {}",
                                     key,
                                     DateFormatUtils.format(window.getStart(),timepatrn)+","+DateFormatUtils.format(window.getEnd(),timepatrn),
@@ -227,7 +234,71 @@ public class FlinkPractice {
                 });
         return operator;
     }
+    //有状态计算使用的状态变量的使用
+    static void processInTimeWindow(KeyedStream<MarsMobilePage4AScore, Long> keyedStream){
+        //有状态计算：准备从RuntimeContext中拿到上下文变量（注意如果MapState#get找不到，返回默认值是null，这个在MapStateDescriptor中写死了）
+        MapStateDescriptor<String, Long> mapStateDescriptor = new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
+        ValueStateDescriptor<Long> valueStateDescriptor = new ValueStateDescriptor<Long>("value_state_descriptor_359", Long.class);
+        StateTtlConfig stateTtlConfig = StateTtlConfig
+                //todo 这个有效时间可以自动清空状态变量？？？
+                //.newBuilder(org.apache.flink.api.common.time.Time.days(1))
+                .newBuilder(org.apache.flink.api.common.time.Time.seconds(2))
+                .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
+                .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+                .build();
+        mapStateDescriptor.enableTimeToLive(stateTtlConfig);
+        valueStateDescriptor.enableTimeToLive(stateTtlConfig);
 
+        SingleOutputStreamOperator<AScoreVariablesResult> operator =
+                keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(30)))
+                        //水位有允许迟到时长，窗口也有一个，todo 都是啥效果
+                        .allowedLateness(Time.seconds(0))
+                        //.trigger(ContinuousEventTimeTrigger.of(Time.seconds(30)))
+                        .process(new ProcessWindowFunction<MarsMobilePage4AScore, AScoreVariablesResult, Long, TimeWindow>() {
+                            private MapState<String, Long> statistics;
+                            private ValueState<Long> valueState;
+                            @Override
+                            public void process(Long key, Context context, Iterable<MarsMobilePage4AScore> elements, Collector<AScoreVariablesResult> out) throws Exception {
+                                /**
+                                 从windowState里获取KeyedState与从globalState中获取有什么不同?
+                                 todo ProcessWindow下无法操作，报错：Per-window state is not allowed when using merging windows.
+                                 ValueState<Long> longValueState = context.windowState().getState(valueStateDescriptor);
+                                 longValueState.update(longValueState.value() + size);
+                                 */
+                                /**
+                                 网上、书上都喜欢从open方法里拿Keyed State 这里发现每次重新get也可以(测试过MapState ValueState)
+                                 ValueState<Long> longValueState1 = context.globalState().getState(valueStateDescriptor);
+                                 longValueState1.update(longValueState1.value() == null ? size: longValueState1.value() + size);
+                                 valueState.update(valueState.value() == null ? size : valueState.value() + size);
+                                 logger.info("current window get value state: reget = {}, fromOpen = {}", longValueState1.value(), valueState.value());
+                                 -- 一个有趣的现象：上面value值扩大了2倍
+                                 */
+                                //只要改个name就可拥有很多状态变量！
+                                if (key == 102){
+                                    int size = Iterables.size(elements);
+                                    ValueState<Long> aState = context.globalState().getState(new ValueStateDescriptor<Long>("a",Long.class));
+                                    ValueState<Long> bState = context.globalState().getState(new ValueStateDescriptor<Long>("b", Long.class));
+                                    aState.update(aState.value() == null?size:aState.value()+size);
+                                    bState.update(bState.value() == null?size* 2L :bState.value()+size* 2L);
+                                    logger.info("multi-valuestate test in window: a = {}, b = {}", aState.value(), bState.value());
+                                }
+                            }
+                            @Override
+                            public void open(Configuration parameters) throws Exception {
+                                //生命周期函数调用次数 > 窗口触发次数，open方法与close方法调用次数相同。
+                                // 一次测试案例：11条数据 调用16次 窗口触发 5 次，trigger关闭
+                                //logger.info("松鼠：open and get stat from context");
+                                RuntimeContext runtimeContext = getRuntimeContext();
+                                statistics = runtimeContext.getMapState(mapStateDescriptor);
+                                valueState = runtimeContext.getState(valueStateDescriptor);
+                            }
+
+                            @Override
+                            public void close() throws Exception {
+                                //logger.info("松鼠：trigger close method"); //11条数据调用16次
+                            }
+                        });
+    }
 
     //todo 1天失效是创建之时开始，还是固定0点？ 设置2分钟失效，能否观测到失效？需要在流式数据测试中调试
      //MapStat中维护大量数据
@@ -245,61 +316,33 @@ public class FlinkPractice {
         //evctor 还用不上，filter足够了
         //是不是可以一个keyStream分别走两条流水线，一个计算次数，一个计算时长？？？
 
-        //有状态计算：准备从RuntimeContext中拿到上下文变量
-        MapStateDescriptor<String, Long> descriptor =
-                new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
-        StateTtlConfig ttlConfig = StateTtlConfig.newBuilder(org.apache.flink.api.common.time.Time.days(1))
-                .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
-                .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
-                .build();
-        descriptor.enableTimeToLive(ttlConfig);
-
-        SingleOutputStreamOperator<Tuple2<String, Long>> operator = keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(90)))
-                .trigger(ContinuousEventTimeTrigger.of(Time.seconds(2)))
-                .process(new ProcessWindowFunction<MarsMobilePage4AScore, Tuple2<String, Long>, Long, TimeWindow>() {
-                    private MapState<String, Long> statistics;
+        SingleOutputStreamOperator<AScoreVariablesResult> operator = keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(30)))
+                .apply(new WindowFunction<MarsMobilePage4AScore, AScoreVariablesResult, Long, TimeWindow>() {
                     @Override
-                    public void process(Long key, Context context, Iterable<MarsMobilePage4AScore> elements, Collector<Tuple2<String, Long>> out) throws Exception {
-                        MapState<String, Long> mapState = context.globalState().getMapState(descriptor);
-                        statistics.put("userId",key);
-                        if (key == 102){
-                            statistics.put("102",(long)"helloflink".length());
-                            out.collect(new Tuple2<String,Long>("这是102输出结果",key));
-                            mapState.put("这是102输出结果",key);
-                        }else {
-                            statistics.put("10x",2333L);
-                            out.collect(new Tuple2<String,Long>("这是10x输出结果",key));
-                            mapState.put("这是10x输出结果",key);
+                    public void apply(Long key, TimeWindow window, Iterable<MarsMobilePage4AScore> input, Collector<AScoreVariablesResult> out) throws Exception {
+                        if (key == 102) {
+                            logger.info("trigger window: size = {}", Iterables.size(input));
                         }
-                    }
-
-                    @Override
-                    public void open(Configuration parameters) throws Exception {
-                        logger.info("松鼠：open and get stat from context");
-                        RuntimeContext runtimeContext = getRuntimeContext();
-                        statistics = runtimeContext.getMapState(descriptor);
-                    }
-
-                    @Override
-                    public void close() throws Exception {
-                        logger.info("松鼠：trigger close method");
+                        AScoreVariablesResult result = new AScoreVariablesResult();
+                        result.setUserId(key);
+                        out.collect(result);
                     }
                 });
-        //用上有状态计算后啥东西都变得Rich了
-        operator.addSink(new RichSinkFunction<Tuple2<String, Long>>() {
+        /**
+         * WindowStream 直接去用 RichSinkFunction 拿状态变量会报 Keyed state can only be used on a 'keyed stream', i.e., after a 'keyBy()' operation.
+         * 只能在 KeyedStream add 的 RichSinkFunction 中取变量
+         */
+        //KeyedStream<AScoreVariablesResult, Long> middleResult = operator.keyBy((KeySelector<AScoreVariablesResult, Long>) value -> value.userId);
+        //SingleOutputStreamOperator<AScoreVariablesResult> reduceOperator = middleResult.reduce((ReduceFunction<AScoreVariablesResult>) (value1, value2) -> { });
+
+        operator.addSink(new RichSinkFunction<AScoreVariablesResult>() {
             @Override
-            public void invoke(Tuple2<String, Long> value, Context context) throws Exception {
-                RuntimeContext runtimeContext = getRuntimeContext();
-                MapState<String, Long> mapState = runtimeContext.getMapState(descriptor);//todo 空指针，Sink中拿不到
+            public void invoke(AScoreVariablesResult value, Context context) throws Exception {
                 logger.info("松鼠：context在Sink中：timestamp={},curWaterMK={},curProsTime={}",
                         context.timestamp(),context.currentWatermark(),context.currentProcessingTime());
                 logger.info("松鼠：tuple={}", value);
-                StringBuilder builder = new StringBuilder();
-                mapState.iterator().forEachRemaining(item -> builder.append(item.getKey() + item.getKey()).append("\n,"));
-                logger.info("松鼠：看看能不能拿到状态变量：{}", builder.toString());
             }
         });
-
 
 
         streamEnv.execute("ascores");
