@@ -6,16 +6,26 @@ import com.learning.pojos.ViewEvent;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.FlatJoinFunction;
 import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.GroupReduceFunction;
+import org.apache.flink.api.common.functions.JoinFunction;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.MapPartitionFunction;
 import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.io.FileInputFormat;
+import org.apache.flink.api.common.io.OutputFormat;
+import org.apache.flink.api.common.io.RichOutputFormat;
+import org.apache.flink.api.common.operators.Order;
+import org.apache.flink.api.common.operators.base.JoinOperatorBase;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
@@ -33,15 +43,31 @@ import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.aggregation.Aggregations;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.io.CsvInputFormat;
+import org.apache.flink.api.java.io.jdbc.JDBCInputFormat;
+import org.apache.flink.api.java.io.jdbc.JDBCOutputFormat;
+import org.apache.flink.api.java.operators.AggregateOperator;
+import org.apache.flink.api.java.operators.DataSink;
+import org.apache.flink.api.java.operators.DataSource;
+import org.apache.flink.api.java.operators.DistinctOperator;
+import org.apache.flink.api.java.operators.FilterOperator;
+import org.apache.flink.api.java.operators.FlatMapOperator;
+import org.apache.flink.api.java.operators.GroupReduceOperator;
+import org.apache.flink.api.java.operators.JoinOperator;
+import org.apache.flink.api.java.operators.MapOperator;
+import org.apache.flink.api.java.operators.UnsortedGrouping;
+import org.apache.flink.api.java.operators.join.JoinFunctionAssigner;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.api.java.typeutils.RowTypeInfo;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
@@ -85,6 +111,8 @@ import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
+import org.apache.flink.types.Row;
+import org.apache.flink.types.StringValue;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.slf4j.Logger;
@@ -93,18 +121,30 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.net.URL;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.LongSummaryStatistics;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 public class FlinkPrimaryAPI {
 	static Logger logger = LoggerFactory.getLogger("StreamingJob");
 	static StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+	static ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
 
 	static class FlinkProgrammeStructure{
 		static ExecutionEnvironment dataSetEnv = ExecutionEnvironment.getExecutionEnvironment();
@@ -637,7 +677,7 @@ public class FlinkPrimaryAPI {
 			}
 
 			private StateDescriptor<ReducingState<Long>,Long> stateDescriptor = new ReducingStateDescriptor<Long>(
-					"current_partition_starttime", (ReduceFunction<Long>) (v1, v2) -> Math.min(v1,v2), Types.LONG);
+					"current_partition_starttime", (ReduceFunction<Long>) (v1, v2) -> Math.min(v1,v2), org.apache.flink.api.common.typeinfo.Types.LONG);
 
 			@Override //针对每一个接入窗口的数据元素进行触发操作,每一个元素过来都会被调用到
 			public TriggerResult onElement(PageEvent pageEvent, long timestamp, Window window, TriggerContext context) throws Exception {
@@ -1067,39 +1107,521 @@ public class FlinkPrimaryAPI {
 		}
 	}
 
-	public static void main(String[] args) throws Exception {
-		DataStreamSource<String> socketSource = streamEnv.socketTextStream("localhost", 9862,"\n");
-		socketSource.addSink(new SinkFunction<String>() {
-			@Override
-			public void invoke(String value, Context context) throws Exception {
-				logger.info("socketSink receive: value = {}, watermark = {}", value, context.currentWatermark());
-			}
-		});
-		socketSource.print("sink_no_2487");
-		streamEnv.execute("aaaa");
-		//final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		//env.readTextFile("file:///file/testdata");
-		/*
-		 * Here, you can start creating your execution plan for Flink.
-		 *
-		 * Start with getting some data from the environment, like
-		 * 	env.readTextFile(textPath);
-		 *
-		 * then, transform the resulting DataStream<String> using operations
-		 * like
-		 * 	.filter()
-		 * 	.flatMap()
-		 * 	.join()
-		 * 	.coGroup()
-		 *
-		 * and many more.
-		 * Have a look at the programming guide for the Java API:
-		 *
-		 * https://flink.apache.org/docs/latest/apis/streaming/index.html
-		 *
-		 */
+	//Flink DataSet API
+	static class AboutDataSetAPI{
+		private static final String driverName = "com.mysql.cj.jdbc.Driver";
+		private static final String dbURL = "jdbc:mysql://localhost:3306/sakila";
+		private static final String userName = "root";
+		private static final String passcode = System.getenv("passcode");
 
-		// execute program
-		//env.execute("Flink Streaming Java API Skeleton");
+		//实现一个简单的单词计数功能（防止泛型擦除，不要使用lambda表达式）
+		static void simpleWordCount() throws Exception {
+			DataSource<String> dataSource =
+					batchEnv.fromElements("aab csi sdof soi", "sdof uitd ci sdof","sdof uitd aab");
+			//这里不能使用Lambda表达式，泛型擦除会导致类型信息丢失
+			FlatMapOperator<String, String> flatMapOperator = dataSource.flatMap(
+					new FlatMapFunction<String, String>() {
+						@Override
+						public void flatMap(String value, Collector<String> out) throws Exception {
+							String[] ss = value.split(" ");
+							//Stream.of(ss).forEach(out::collect);
+							for (String s : ss){
+								out.collect(s);
+							}
+						}
+					});
+			//由于泛型擦除的原因，这里写 flatMapOperator.filter((FilterFunction<String>)StringUtils::isNotBlank) 会报错
+			//InvalidTypesException: The return type of function 'simpleWordCount(FlinkPrimaryAPI.java:1089)' could not be determined automatically, due to type erasure. You can give type information hints by using the returns(...) method on the result of the transformation call, or by letting your function implement the 'ResultTypeQueryable' interface.
+			FilterOperator<String> filterOperator = flatMapOperator.filter(new FilterFunction<String>() {
+				@Override
+				public boolean filter(String value) throws Exception {
+					return StringUtils.isNotBlank(value);
+				}
+			});
+			MapOperator<String, Tuple2<String,Integer>> mapOperator = filterOperator.map(
+					new MapFunction<String, Tuple2<String, Integer>>() {
+						@Override
+						public Tuple2<String, Integer> map(String value) throws Exception {
+							return new Tuple2<>(value, 1);
+						}
+					});
+			UnsortedGrouping<Tuple2<String, Integer>> unsortedGrouping = mapOperator.groupBy("f0");
+			// dataset API：这里不能使用KeySelector，否则报 Aggregate does not support grouping with KeySelector functions, yet.
+			//UnsortedGrouping<Tuple2<String, Integer>> unsortedGrouping =
+			//		mapOperator.groupBy(new KeySelector<Tuple2<String, Integer>, String>() {
+			//			@Override
+			//			public String getKey(Tuple2<String, Integer> value) throws Exception {
+			//				return value.f0;
+			//			}
+			//		});
+
+			/**
+			 * 累加得到最终结果，下面两行写法等效
+			 */
+			AggregateOperator<Tuple2<String, Integer>> aggregateOperator = unsortedGrouping.aggregate(Aggregations.SUM,1);
+			//AggregateOperator<Tuple2<String, Integer>> aggregateOperator = unsortedGrouping.sum(1);
+			//打印结果
+			aggregateOperator.print();
+			//dataset api 不需要调execute，否则报错
+			//batchEnv.execute();
+		}
+
+		/**
+		 * DataSource数据接入
+		 DataSet API支持从多种数据源中将批量数据集读到Flink系统中，并转成DataSet数据集
+		 */
+		static class DataSourcesAPI{
+			private static final String update = "update city set city = ? where city_id = ?";
+			//读取本地文件 - filePath = file:///file/mars_mobile_page.csv
+			//HDFS文件 - filePath = hdfs://nnHost:nnPort/path/textFile
+			static void fileDataSource(String filePath) throws Exception{
+				DataSource<String> stringDataSource = batchEnv.readTextFile(filePath);
+				stringDataSource.print();
+				/*
+				StringValue是一种可变的String类型，通过StringValue存储文本可以有效降低String对象创建数量，从而提升性能
+				 */
+				DataSource<StringValue> stringValueDataSource = batchEnv.readTextFileWithValue(filePath);
+				/*
+				CsvReader自带转Tuple功能，很方便
+				 */
+				DataSource<Tuple4<Long, String, Long, String>> types = batchEnv.readCsvFile(filePath).fieldDelimiter(",").types(
+						Long.class, String.class, Long.class, String.class);
+				MapOperator<Tuple4<Long, String, Long, String>, Long> mapOperator = types.map(new MapFunction<Tuple4<Long, String, Long, String>, Long>() {
+					@Override
+					public Long map(Tuple4<Long, String, Long, String> value) throws Exception {
+						return value.f2;
+					}
+				});
+				mapOperator.print();
+			}
+			//集合类数据 fromCollection fromElements
+			static void collectionDataSource()throws Exception{
+				//凭空造数据
+				DataSource<Long> longDataSource = batchEnv.generateSequence(1, 200);
+			}
+			static void inputFormatDataSource(String filePath) throws Exception{
+				batchEnv.readFile(new FileInputFormat<String>() {
+					@Override
+					public boolean reachedEnd() throws IOException {
+						return false;
+					}
+					@Override
+					public String nextRecord(String reuse) throws IOException {
+						return null;
+					}
+				},filePath);
+				//从mysql中读取数据,使用createInput
+			}
+			/*
+			从MySQL读取/写入数据
+			如果使用flink封装的 JDBCInputFormat， 需要引入org.apache.flink flink-jdbc_xxx
+			也可以通过RichSourceFunction自定义数据源
+			 */
+			static DataSource<Row> readFromMySQL() throws Exception{
+				String query = "select * from city where country_id=2";
+				TypeInformation[] fieldTypes = new TypeInformation[]{
+						TypeInformation.of(Long.class),TypeInformation.of(String.class),
+						TypeInformation.of(Long.class),TypeInformation.of(Date.class)
+				};
+				RowTypeInfo rowTypeInfo = new RowTypeInfo(fieldTypes);
+				//JDBC链接信息Builder的两种创建方式
+				JDBCInputFormat.JDBCInputFormatBuilder inputBuilder = JDBCInputFormat.buildJDBCInputFormat();
+				//JDBCInputFormat.JDBCInputFormatBuilder jdbcInputFormatBuilder = new JDBCInputFormat.JDBCInputFormatBuilder();
+				JDBCInputFormat jdbcInputFormat = inputBuilder.setDrivername(driverName).setDBUrl(dbURL)
+						.setUsername(userName).setPassword(passcode)
+						.setQuery(query).setRowTypeInfo(rowTypeInfo)
+						.finish();
+				DataSource<Row> dataSource = batchEnv.createInput(jdbcInputFormat);
+				return dataSource;
+			}
+			//实现一种跑批功能，对查到的数据做一点修改后入库
+			static void write2MySQLWithRichOutputFormat(DataSource<Row> dataSource) throws Exception{
+				MapOperator<Row, Tuple2<String,Integer>> mapOperator = dataSource.map(new MapFunction<Row, Tuple2<String,Integer>>() {
+					@Override
+					public Tuple2<String,Integer> map(Row row) throws Exception {
+						//Set<String> fieldNames = row.getFieldNames(true);//拿到一堆f0 f1... 拿不到MySQL列名
+						String city = row.<String>getFieldAs(1);
+						Integer city_id = row.<Integer>getFieldAs(0);//dataset api不成熟，传进去Long.class得到却是Integer，转换会报错
+						System.out.println(row.<Date>getFieldAs(3));
+						if (city.endsWith("2")){
+							city = city.substring(0,city.length()-1);
+						}else {
+							city = city+"2";
+						}
+						return new Tuple2<String,Integer>(city,city_id);
+					}
+				});
+				//写入数据库的操作可以通过自定义RichOutputFormat的方式实现(仅仅是程序能跑而已)
+				DataSink<Tuple2<String, Integer>> dataSink = mapOperator.output(new RichOutputFormat<Tuple2<String, Integer>>() {
+					private Connection connection;
+					private PreparedStatement statement;
+
+					@Override
+					public void configure(Configuration parameters) {
+					}
+
+					@Override
+					public void open(int taskNumber, int numTasks) throws IOException {
+						try {
+							Class.forName(driverName);
+							connection = DriverManager.getConnection(dbURL, userName, passcode);
+							statement = connection.prepareStatement(update);
+						} catch (Exception e) {
+							e.printStackTrace();
+						}
+					}
+
+					@Override
+					public void writeRecord(Tuple2<String, Integer> record) throws IOException {
+						try {
+							statement.setString(1, record.f0);
+							statement.setInt(2, record.f1);
+							int i = statement.executeUpdate();
+							System.out.println(record.f0 + "更新成功：" + (i > 0));
+						} catch (SQLException throwables) {
+							throwables.printStackTrace();
+						}
+
+					}
+
+					@Override
+					public void close() throws IOException {
+						try {
+							statement.close();
+							connection.close();
+						} catch (SQLException throwables) {
+							throwables.printStackTrace();
+						}
+					}
+				});
+				batchEnv.execute();
+			}
+			//使用 JDBCOutputFormat 如何将数据落库
+			//用于insert数据，传入的SQL通常就是insert into xxx value xxx
+			static void insert2MySQL() throws Exception{
+				DataSource<Row> dataSource = readFromMySQL();//懒得造数据了，直接查出来，改下city_id/city落库
+				//JDBCOutputFormat中将数据类型限定为Row！
+				MapOperator<Row, Row> mapRowOperator = dataSource.map(new MapFunction<Row, Row>() {
+					@Override
+					public Row map(Row row) throws Exception {
+						String city = row.<String>getFieldAs(1);
+						if (city.endsWith("2")) {
+							city = city.substring(0, city.length() - 1);
+						} else {
+							city = city + "2";
+						}
+						row.setField(1, city);
+						return row;
+					}
+				});
+				JDBCOutputFormat.JDBCOutputFormatBuilder outputBuilder = JDBCOutputFormat.buildJDBCOutputFormat()
+						.setDrivername(driverName).setDBUrl(dbURL)
+						.setUsername(userName).setPassword(passcode)
+						.setBatchInterval(2);//一次批量提交多少条数据
+				//这里会出key冲突问题，意思一下
+				OutputFormat outputFormat = outputBuilder.setQuery("insert into city(city_id,city,country_id,last_update) value(?,?,?,?)").finish();
+				mapRowOperator.output(outputFormat);
+				//将Tuple类型结果写入关系型数据库
+				batchEnv.execute();
+			}
+			//更新数据，重新创建出Row，这种写法因为类型丢失的问题，运行时有很多WARN，虽然最终成功更新数据库
+			//看框架源码 org.apache.flink.api.java.io.jdbc.JDBCTypeUtil 可知，可以向 JDBCOutputFormat 传递类型信息来避免类型映射告警
+			static void updateMySQL() throws Exception{
+				DataSource<Row> rowDataSource = readFromMySQL();
+				MapOperator<Row, Row> mapOperator = rowDataSource.map(new MapFunction<Row, Row>() {
+					@Override
+					public Row map(Row row) throws Exception {
+						String city = row.<String>getFieldAs(1);
+						Integer city_id = row.<Integer>getFieldAs(0);
+						if (city.endsWith("2")) {
+							city = city.substring(0, city.length() - 1);
+						} else {
+							city = city + "2";
+						}
+						//Row存在类型丢失问题 class org.apache.flink.types.Row is missing a default constructor so it cannot be used as a POJO type and must be processed as GenericType. Please read the Flink documentation on "Data Types & Serialization" for details of the effect on performance.
+						return Row.of(city, city_id);
+					}
+				});
+				int[] types = {Types.VARCHAR, Types.INTEGER};
+				JDBCOutputFormat.JDBCOutputFormatBuilder outputBuilder = JDBCOutputFormat.buildJDBCOutputFormat()
+						.setDrivername(driverName).setDBUrl(dbURL)
+						.setUsername(userName).setPassword(passcode)
+						.setSqlTypes(types) //JDBCInputFormat中也有类型设置，少这一行设置会有很多类型问题WARN
+						.setBatchInterval(2);//一次批量提交多少条数据
+				OutputFormat outputFormat = outputBuilder.setQuery(update).finish();
+				DataSink dataSink = mapOperator.output(outputFormat);
+				batchEnv.execute();
+			}
+			public static void main(String[] args)throws Exception {
+				//本地调试发现这样读取文件才好用
+				URL csvResource = FlinkPractice.class.getResource("/file/mars_mobile_page.csv");
+				//fileDataSource(csvResource.getPath());
+				updateMySQL();
+			}
+		}
+
+		//# DataSetAPI中丰富的转换操作
+		static class DateSetOperation{
+			//Map操作，数据分区不发生变化
+			static void operate() throws Exception{
+				DataSource<Long> longDataSource = batchEnv.generateSequence(1, 100);
+				//MapPartiton 不再是1转1，而是一个分区中的 n转n：通过Iterator传入，通过collector收集
+				longDataSource.mapPartition(new MapPartitionFunction<Long, String>() {
+					@Override
+					public void mapPartition(Iterable<Long> values, Collector<String> out) throws Exception {
+					}
+				});
+				//ReduceGroup 将一组元素合并成一个或多个元素，可以在整个数据集上使用，也可以用于 Group Data Set
+				GroupReduceOperator<Long, String> groupReduceOperator = longDataSource.reduceGroup(new GroupReduceFunction<Long, String>() {
+					@Override
+					public void reduce(Iterable<Long> values, Collector<String> out) throws Exception {
+						Stream<Long> stream = StreamSupport.stream(values.spliterator(), false);
+						LongSummaryStatistics summary = stream.collect(Collectors.summarizingLong(item -> item));
+						out.collect("count = "+summary.getCount());
+						out.collect("sum = "+summary.getSum());
+						out.collect("average = "+summary.getAverage());
+						out.collect("time = "+new Date());
+					}
+				});
+				groupReduceOperator.print();
+			}
+			static void aggregate() throws Exception{
+				DataSource<Tuple2<Long, Long>> tuple2DataSource =
+						batchEnv.<Tuple2<Long, Long>>fromElements(new Tuple2<>(12L, 15L), new Tuple2<>(13L, 18L), new Tuple2<>(13L,17L));
+				//两个aggregateFunction连用，先求第一个字段最大的，得到两个结果，在从两个结果中找第二个字段最小的，最终
+				AggregateOperator<Tuple2<Long, Long>> aggregateOperator =
+						tuple2DataSource.aggregate(Aggregations.MAX, 0)
+								.aggregate(Aggregations.MIN, 1);
+				aggregateOperator.print();//(13,17)
+			}
+			//Dataset 可以去重
+			static void distinct() throws Exception{
+				DataSource<Integer> dataSource = batchEnv.<Integer>fromElements(12, 13, 15, 13, 14);
+				DistinctOperator<Integer> distinctOp = dataSource.distinct();
+				distinctOp.print();
+			}
+			static DataSource<Tuple3<Long, String, Integer>> students = batchEnv.<Tuple3<Long, String, Integer>>fromElements(
+					new Tuple3<>(1L, "jack", 12),
+					new Tuple3<>(3L, "lucy", 13),
+					new Tuple3<>(4L, "daniel", 13)
+			);
+			static DataSource<Tuple3<Long, String, String>> address = batchEnv.<Tuple3<Long, String, String>>fromElements(
+					new Tuple3<>(1L, "china", "beijing"),
+					new Tuple3<>(2L, "china", "shanghai"),
+					new Tuple3<>(3L, "america", "new york")
+			);
+			//多表关联
+			static void tryJoin() throws Exception{
+				//join操作，左边的表在where中指定字段，右边的表在equalTo中指定. flink中默认的join是 inner join
+				//也可以使用KeySelector选择key
+				/*
+				使用flink java api 模拟SQL中的联表查询
+				select s.id,s.name,a.city from student s inner join address a on a.student_id = s.id
+				 */
+				JoinOperator.DefaultJoin<Tuple3<Long, String, Integer>,
+						Tuple3<Long, String, String>> joinOperator =
+						students.join(address).where("f0").equalTo(0);
+				JoinFunction<Tuple3<Long, String, Integer>,
+						Tuple3<Long, String, String>,
+						Tuple3<Long, String, String>> chooseSelectedFields = new JoinFunction<>() {
+					@Override
+					public Tuple3<Long, String, String> join(Tuple3<Long, String, Integer> first,
+															 Tuple3<Long, String, String> second) throws Exception {
+						//之所以要判空，如果表不是inner join时，有一方会是null
+						return new Tuple3<Long, String, String>(
+								first==null?null:first.f0, first==null?null:first.f1, second==null?null:second.f2);
+					}
+				};
+				/*
+				模拟SQL中的
+				select s.id,s.name,a.city from student s left join address a on a.student_id = s.id
+				将得到3条结果
+				(3,lucy,new york)
+				(1,jack,beijing)
+				(4,daniel,null)
+				 */
+				JoinOperator.EquiJoin<Tuple3<Long, String, Integer>,
+						Tuple3<Long, String, String>,
+						Tuple3<Long, String, String>> withOperator = joinOperator.with(chooseSelectedFields);
+				JoinFunctionAssigner<Tuple3<Long, String, Integer>, Tuple3<Long, String, String>> leftOutJoin =
+						students.leftOuterJoin(address).where("f0").equalTo(0);
+				//其他还有rightOuterJoin\fullOuterJoin
+				JoinOperator<Tuple3<Long, String, Integer>,
+						Tuple3<Long, String, String>,
+						Tuple3<Long, String, String>> leftWithOperator =
+						leftOutJoin.with(chooseSelectedFields);
+				leftWithOperator.print();
+				/*
+					如同flatMap与map的区别，1转n与1转1的区别
+					flatJoin与join的区别相似
+				 */
+				FlatJoinFunction<Tuple3<Long, String, Integer>,
+						Tuple3<Long, String, String>,
+						Tuple3<Long, String, String>> flatJoinFunction = new FlatJoinFunction<>() {
+					@Override
+					public void join(Tuple3<Long, String, Integer> first,
+									 Tuple3<Long, String, String> second,
+									 Collector<Tuple3<Long, String, String>> out) throws Exception {
+						Tuple3<Long, String, String> result1 = new Tuple3<>(first.f0, first.f1, second.f2);
+						Tuple3<Long, String, String> result2 = new Tuple3<>(first.f0, second.f1, second.f2);
+						out.collect(result1);
+						out.collect(result2);
+					}
+				};
+				joinOperator.with(flatJoinFunction);
+				//提示Flink第二个数据集是小数据库
+				students.joinWithTiny(address);
+				//提示Flink第二个数据集是大数据集
+				students.joinWithHuge(address);
+
+				/*
+				使用Join算法提示 JoinHint
+				 */
+				//将第一个数据集广播出去，转换成HashTable存储，适用于第一个数据集小的情况
+				students.join(address, JoinOperatorBase.JoinHint.BROADCAST_HASH_FIRST).where("f0").equalTo(0);
+				//将第二个数据集广播出去，转换成HashTable存储，适用于第二个数据集小的情况
+				students.join(address, JoinOperatorBase.JoinHint.BROADCAST_HASH_SECOND).where(0).equalTo("f0");
+				//将优化工作交给系统处理，可以不写
+				students.join(address, JoinOperatorBase.JoinHint.OPTIMIZER_CHOOSES).where("f0").equalTo(0);
+
+				//将两个数据集重新分区，将第一个数据集转换成HashTable存储，适用于第一个数据集比第二个数据集小，但两个数据集都比较大的情况
+				students.join(address, JoinOperatorBase.JoinHint.REPARTITION_HASH_FIRST).where("f0").equalTo(0);
+				//将两个数据集重新分区，并将每个分区排序，适用于两个数据集已经排好顺序的情况
+				students.join(address, JoinOperatorBase.JoinHint.REPARTITION_SORT_MERGE).where(0).equalTo("f0");
+
+				//outJoin中也支持相关JoinHint
+				students.leftOuterJoin(address, JoinOperatorBase.JoinHint.BROADCAST_HASH_SECOND).where("f0").equalTo(0);
+				/*
+				与Join不同，OuterJoin仅支持部分JoinHint
+				leftOuterJoin仅支持4种： OPTIMIZER_CHOOSES、BROADCAST_HASH_SECOND、REPARTITION_HASH_SECOND、REPARTITION_SORT_MERGE
+				rightOuterJoin仅支持4种：OPTIMIZER_CHOOSES、BROADCAST_HASH_FIRST、REPARTITION_HASH_FIRST、REPARTITION_SORT_MERGE
+				fullOuterJoin仅支持2中：OPTIMIZER_CHOOSES、REPARTITION_SORT_MERGE
+				 */
+			}
+			//## 集合操作
+			void operateCollection(){
+				/*
+				CoGroup的用法：将两个数据集根据相同的Key记录组合在一起，相同Key的记录会存放在一个Group中
+				Cross：将两个数据集合并成一个数据集，返回被连接的两个数据集的所有数据行的笛卡尔乘积
+				 */
+				students.cross(address);
+				/*
+				union 合并两个数据集，类型相同才能合并）
+				rebalance() 对数据集中的数据进行平均分布，使得每个分区上的数据量相同
+				Hash-Partition partitionByHash 根据给定的Key进行Hash分区，key相同的数据会放入同一个分区中
+				 */
+				//根据第一个字段进行hash分区，hash结果相同的会放在一个分区中，执行mapPartition操作处理每个分区的数据
+				students.partitionByHash("f0").mapPartition(null);
+				/*
+				Range-Partition 根据指定Key进行Range分区
+				 */
+				students.partitionByRange("f0").mapPartition(null);
+				//Sort Partition 在本地对Dataset数据集中所有分区根据指定字段进行重排序
+				students
+						//先使用第二个字段 名字 String 对分区数据进行正排序
+						.sortPartition("f1", Order.ASCENDING)
+						//再按第一个字段 id Long 对分区内数据进行逆序排序
+						.sortPartition(0,Order.DESCENDING)
+						.mapPartition(null);//在排序的分区上执行MapPartition转换操作
+			}
+
+			//## 排序操作
+			void reOrderItems(){
+				//普通数据集上获取n条记录
+				students.first(3);
+				//聚合数据集上返回n条记录
+				students.groupBy(0).first(3);
+				//Group 排序数据集上返回n条记录
+				students.groupBy(0).sortGroup(1,Order.ASCENDING).first(3);
+				//从students中找 id 和 age 都最小的字段，如果选择的字段具有多个相同值，则在集合中随机选择一条记录返回
+				students.minBy(0,2);
+				//按第三个字段 年龄 分组，每组中挑id最小的
+				students.groupBy(2).minBy(1);
+			}
+			public static void main(String[] args) throws Exception{
+				tryJoin();
+			}
+		}
+
+		/*
+		# DataSinks数据输出
+		Flink抽象出了通用的OutputFormat接口，实现类有 TextOutputFormat、CSVOutputFormat
+		Flink内置了常用数据存储介质对应的OutputFormat，如 HadoopOutputFormat\JDBCOutputFormat（DataSourcesAPI中有使用案例） 等
+		Flink DataSet API 中的数据输出分为3种类型：
+		- 基于文件实现的 Dataset #write()
+		- 基于通用存储介质 Dataset #output()
+		- 简单的客户端输出 Dataset #print()
+		 */
+		public static class DataSetDataSinks{
+			//获取类根目录的方式，推荐
+			static String classRootPath = Thread.currentThread().getContextClassLoader().getResource("").getPath();
+			//getClassLoader拿到的根目录都是/target/classes下，这种临时目录不好用，获取src下的resources直接写就行，不用那么费劲
+			static String resourcesPath = "src/main/resources/";
+			static String filePath = "file/output_test.txt";
+			//static String filePath = DataSetDataSinks.class.getResource("/file/output_test").getPath();
+			static DataSource<Tuple3<Long, String, String>> address = batchEnv.<Tuple3<Long, String, String>>fromElements(
+					new Tuple3<>(1L, "china", "beijing"),
+					new Tuple3<>(2L, "china", "shanghai"),
+					new Tuple3<>(3L, "america", "new york")
+			);
+			static void writeToFile(){
+				//address.writeAsText(resourcesPath + filePath, FileSystem.WriteMode.OVERWRITE);
+				address.writeAsCsv(resourcesPath + filePath,"\n",",", FileSystem.WriteMode.OVERWRITE);
+			}
+
+			public static void main(String[] args) throws Exception{
+				writeToFile();
+				batchEnv.execute("DataSetDataSinks");
+			}
+		}
+
+		/*
+		# 迭代计算
+		Flink中的迭代计算有两种模式：
+		全量迭代计算 Bulk Iteration
+		增量迭代计算 Delt Iteration
+
+		 */
+		static class IteratorCalculation{
+
+		}
+
+		public static void main(String[] args) throws Exception{
+			simpleWordCount();
+		}
+	}
+	/*
+	获取类路径
+	 */
+	public static void how2GetClassRootPath() {
+		URL resource1 = Thread.currentThread().getContextClassLoader().getResource("//");
+		URL resource2 = Thread.currentThread().getContextClassLoader().getResource("");
+		URL location = FlinkPrimaryAPI.class.getProtectionDomain().getCodeSource().getLocation();
+		//getPath还是getFile无所谓
+		String path1 = resource1.getPath();
+		System.out.println(path1);
+		String file1 = resource2.getFile();
+		String path = location.getPath();
+		String file = location.getFile();
+		//如果要获取resources目录下的路径(file前不能加斜线)
+		Thread.currentThread().getContextClassLoader().getResource("file/").getPath();
+
+	}
+
+	public static void main(String[] args) throws Exception {
+		how2GetClassRootPath();
+		//Configuration configuration = new Configuration();
+		////configuration.("",2586);
+		//StreamExecutionEnvironment webStreamEnv = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(configuration);
+		//DataStreamSource<String> socketSource = webStreamEnv.fromElements("12","34");
+		//socketSource.addSink(new SinkFunction<String>() {
+		//	@Override
+		//	public void invoke(String value, Context context) throws Exception {
+		//		logger.info("socketSink receive: value = {}, watermark = {}", value, context.currentWatermark());
+		//	}
+		//});
+		//socketSource.print("sink_no_2487");
+		//webStreamEnv.execute("aaaa");
+
 	}
 }
