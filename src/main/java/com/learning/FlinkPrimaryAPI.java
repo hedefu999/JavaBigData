@@ -43,6 +43,7 @@ import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.aggregation.Aggregations;
 import org.apache.flink.api.java.functions.KeySelector;
@@ -52,10 +53,12 @@ import org.apache.flink.api.java.io.jdbc.JDBCOutputFormat;
 import org.apache.flink.api.java.operators.AggregateOperator;
 import org.apache.flink.api.java.operators.DataSink;
 import org.apache.flink.api.java.operators.DataSource;
+import org.apache.flink.api.java.operators.DeltaIteration;
 import org.apache.flink.api.java.operators.DistinctOperator;
 import org.apache.flink.api.java.operators.FilterOperator;
 import org.apache.flink.api.java.operators.FlatMapOperator;
 import org.apache.flink.api.java.operators.GroupReduceOperator;
+import org.apache.flink.api.java.operators.IterativeDataSet;
 import org.apache.flink.api.java.operators.JoinOperator;
 import org.apache.flink.api.java.operators.MapOperator;
 import org.apache.flink.api.java.operators.UnsortedGrouping;
@@ -1578,11 +1581,128 @@ public class FlinkPrimaryAPI {
 		/*
 		# 迭代计算
 		Flink中的迭代计算有两种模式：
-		全量迭代计算 Bulk Iteration
-		增量迭代计算 Delt Iteration
-
+		全量迭代计算 Bulk Iteration [3308] 使用蒙特卡罗方法（Monte Carlo method）计算圆周率[https://zh.wikipedia.org/wiki/%E8%92%99%E5%9C%B0%E5%8D%A1%E7%BE%85%E6%96%B9%E6%B3%95]
+		增量迭代计算 Delt Iteration [3309] 官网示例 Propagate Minimum in Graph [https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/dataset/iterations/]
+			这个示例是说，有一个连通图，图的顶点颜色、编号各不相同，每个顶点会向周围传播自己的编号和颜色，每个顶点会将颜色修改为编号比自己小的顶点的颜色
+			颜色的传播需要时间，所以需要经过几轮迭代整个连通图的顶点颜色取得一致
+			这个算法的应用来自社交分析
 		 */
 		static class IteratorCalculation{
+			static DataSource<Tuple3<Long, String, String>> address = batchEnv.<Tuple3<Long, String, String>>fromElements(
+					new Tuple3<>(1L, "china", "beijing"),
+					new Tuple3<>(2L, "china", "shanghai"),
+					new Tuple3<>(3L, "america", "new york")
+			);
+			static void bulkIteration() throws Exception{
+				Integer iterateCount = 100;
+				//初始值为0:Iteration Input
+				DataSource<Integer> intDataSource = batchEnv.fromElements(0);
+				//迭代数据源迭代次数
+				IterativeDataSet<Integer> iterativeDataSet = intDataSource.iterate(iterateCount);
+				//迭代一次要进行的操作：Step Function
+				MapOperator<Integer, Integer> mapOperator = iterativeDataSet.map(new MapFunction<Integer, Integer>() {
+					@Override
+					public Integer map(Integer value) throws Exception {
+						double x = Math.random();
+						double y = Math.random();
+						value += x * x + y * y <= 1 ? 1 : 0;
+						return value;
+					}
+				});
+				//迭代约束条件
+				DataSet<Integer> iterateResult = iterativeDataSet.closeWith(mapOperator);
+				MapOperator<Integer, Double> mapOperator2 = iterateResult.map(new MapFunction<Integer, Double>() {
+					@Override
+					public Double map(Integer value) throws Exception {
+						return (value / (double) iterateCount) * 4;
+					}
+				});
+				//dataset api 使用print打印结果后就不能再调execute方法。stream api也遇到过
+				//否则报 No new data sinks have been defined since the last execution. The last execution refers to the latest call to 'execute()', 'count()', 'collect()', or 'print()'.
+				mapOperator2.print();
+
+				//batchEnv.execute("");
+			}
+			//todo 待研究 增量迭代缺少案例
+			static void deltaIteration() throws Exception{
+				int iterativeNum = 100;
+				//连通图的顶点
+				DataSource<Long> vertex = batchEnv.fromElements(1L, 2L, 3L, 4L, 5L, 6L, 7L);
+				//两张连通图的边
+				DataSource<Tuple2<Long, Long>> edges = batchEnv.fromElements(
+						Tuple2.of(1L, 2L),
+						Tuple2.of(2L, 3L),
+						Tuple2.of(2L, 4L),
+						Tuple2.of(3L, 4L),
+						Tuple2.of(5L, 6L),
+						Tuple2.of(5L, 7L),
+						Tuple2.of(6L, 7L)
+				);
+				//单向边转双向边
+				FlatMapOperator<Tuple2<Long, Long>, Tuple2<Long, Long>> flatMapOperator = edges.flatMap(new FlatMapFunction<Tuple2<Long, Long>, Tuple2<Long, Long>>() {
+					@Override
+					public void flatMap(Tuple2<Long, Long> value, Collector<Tuple2<Long, Long>> collector) throws Exception {
+						collector.collect(value);
+						collector.collect(Tuple2.of(value.f1, value.f0));
+					}
+				});
+				// 将顶点映射为(v,v)的形式 作为 initialSolutionSet
+				MapOperator<Long, Tuple2<Long, Long>> initialSolutionSet = vertex.map(new MapFunction<Long, Tuple2<Long, Long>>() {
+					@Override
+					public Tuple2<Long, Long> map(Long value) throws Exception {
+						return Tuple2.of(value, value);
+					}
+				});
+				//将顶点映射为（v，v）的形式，作为initialWorkset
+				MapOperator<Long, Tuple2<Long, Long>> initialWorkSet = vertex.map(new MapFunction<Long, Tuple2<Long, Long>>() {
+					@Override
+					public Tuple2<Long, Long> map(Long value) throws Exception {
+						return Tuple2.of(value, value);
+					}
+				});
+				DeltaIteration<Tuple2<Long, Long>, Tuple2<Long, Long>> iterative =
+						initialSolutionSet.iterateDelta(initialWorkSet, iterativeNum, 0);
+				/*
+				数据集合边做 join 操作，求出
+				1,2,3 三个顶点与 (1,2)(1,3)(2,3)... 6对双向边join，相当于表的连接,使用第一个字段join
+				(1,1)				(1,2)
+				(2,2)				(1,3)
+				(3,3) 	inner join 	(2,3)
+									(2,1)
+									(3,1)
+									(3,2)
+				 */
+				JoinOperator.EquiJoin<Tuple2<Long, Long>, Tuple2<Long, Long>, Tuple2<Long, Long>> changes = iterative.getWorkset()
+						.join(edges).where(0).equalTo(0)
+						.with(new JoinFunction<Tuple2<Long, Long>, Tuple2<Long, Long>, Tuple2<Long, Long>>() {
+							@Override
+							public Tuple2<Long, Long> join(Tuple2<Long, Long> first, Tuple2<Long, Long> second) throws Exception {
+								return Tuple2.of(second.f1, first.f1);//6个tuple2,内容与edges相同
+							}
+						}).groupBy(0).aggregate(Aggregations.MIN, 1) //(1,2) (2,1) (3,1)
+						//
+						.join(iterative.getSolutionSet()).where(0).equalTo(0)
+						.with(new FlatJoinFunction<Tuple2<Long, Long>, Tuple2<Long, Long>, Tuple2<Long, Long>>() {
+							@Override
+							public void join(Tuple2<Long, Long> first, Tuple2<Long, Long> second, Collector<Tuple2<Long, Long>> out) throws Exception {
+								if (first.f1 < second.f1) {
+									out.collect(first);//只留下 (2,1) (3,1)
+								}
+							}
+						});
+				DataSet<Tuple2<Long, Long>> result = iterative.closeWith(changes, changes);
+				result.print();
+			}
+
+			public static void main(String[] args) throws Exception{
+				bulkIteration();
+			}
+		}
+		/*
+		# 广播变量与分布式缓存
+
+		 */
+		static class BroadcastData{
 
 		}
 
