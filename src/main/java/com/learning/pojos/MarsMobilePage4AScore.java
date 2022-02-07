@@ -41,7 +41,7 @@ public class MarsMobilePage4AScore implements Comparable<MarsMobilePage4AScore>{
         long epochSecond = LocalDateTime.parse(startTime, dateTimeFormatter).atZone(ZoneId.systemDefault()).toInstant().getEpochSecond();
         //这个字段被指定为Flink的EventTime，long值必须以毫秒为单位，否则会出现窗口时长指定2秒变成2000秒的奇怪问题
         //而且改对后窗口在批式处理时窗口也正确的变成多个，而且数据也变成有序了！！！相当长时间的本地调试都是基于这个错误的时间戳上，惨
-        //todo 设置watermark时注意timestamp字段时毫秒
+        //设置watermark时注意timestamp字段是毫秒
         score.setPageStartTime(epochSecond*1000);
         return score;
     }

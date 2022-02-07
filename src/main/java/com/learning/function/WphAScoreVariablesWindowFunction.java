@@ -38,9 +38,7 @@ public class WphAScoreVariablesWindowFunction extends ProcessWindowFunction<Mars
     public static final HashSet<Long> FAKE_ORDERS_PAGE_IDS = Sets.newHashSet(14L,20L,26L);
     //有状态计算：准备从RuntimeContext中拿到上下文变量（注意如果MapState#get找不到，返回默认值是null，这个在MapStateDescriptor中写死了）
     //static MapStateDescriptor<String, Long> descriptor = new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
-    //todo 其他 KeyedStateDescriptor 要写一下
     static StateTtlConfig ttlConfig = StateTtlConfig
-            //todo 这个有效时间可以自动清空状态变量？？？
             .newBuilder(org.apache.flink.api.common.time.Time.days(1))
             .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
             .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
@@ -99,11 +97,10 @@ public class WphAScoreVariablesWindowFunction extends ProcessWindowFunction<Mars
                 newPageTypes.add(item.pageType);//窗口中的元素之间也有可能重复
             }
             //4. 最复杂的，要做两次遍历，先准备数据
-            //page_on_time 的计算办法与批处理类似,缺点：一个窗口的最后一个Page日志无法计算页面停留时长 todo check 目前先忽略吧
+            //page_on_time 的计算办法与批处理类似,缺点：一个窗口的最后一个Page日志无法计算页面停留时长
             if (i != size - 1){
                 item.pageOnTime = sortedElements.get(i+1).pageStartTime - item.pageStartTime;
             } else {
-                //todo 最后一个item的page_on_time 无法计算，干脆就用window结尾轧差了，这种计算方式在SesssionWindow下就是SessionGap,在TumblingWindow下值很随机
                 item.pageOnTime = context.window().getEnd() - item.pageStartTime;
                 logger.info("last item {} in window {} page_on_time was specified as {}",key, context.window().getEnd(),item.pageOnTime);
             }

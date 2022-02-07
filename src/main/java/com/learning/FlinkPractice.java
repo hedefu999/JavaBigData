@@ -70,7 +70,6 @@ public class FlinkPractice {
     static Logger logger = LoggerFactory.getLogger("FlinkPractice");
     public static final String timepatrn = "yyyyMMddHHmmss";
     static StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
-    //todo test
     //static StreamExecutionEnvironment webStreamEnv = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(new Configuration());
     static URL csvResource = FlinkPractice.class.getResource("/file/mars_mobile_page.csv");
     //运行出错
@@ -128,7 +127,7 @@ public class FlinkPractice {
 
         //新版Flink API 使用的WaterMark API
         WatermarkStrategy<MarsMobilePage4AScore> watermarkStrategy =
-                WatermarkStrategy.<MarsMobilePage4AScore>forBoundedOutOfOrderness(Duration.ofSeconds(5)) //乱序数据考虑的最大时长(再晚来就不要了)todo 两秒触发后这个迟到策略还有用？)
+                WatermarkStrategy.<MarsMobilePage4AScore>forBoundedOutOfOrderness(Duration.ofSeconds(5)) //乱序数据考虑的最大时长(再晚来就不要了))
                 //.withIdleness(Duration.ofSeconds(100)) //流数据不产生进入闲置状态的超时时长，优化性能
                 .withTimestampAssigner((event,timestamp) -> event.getPageStartTime()); //使用SerializableTimestampAssigner通过labmda表达式指定时间戳字段，另一个TimestampAssignerSupplier是通过context方式，接入metricbeats可能用的到
 
@@ -242,7 +241,6 @@ public class FlinkPractice {
         MapStateDescriptor<String, Long> mapStateDescriptor = new MapStateDescriptor<String, Long>("user_statistics", String.class, Long.class);
         ValueStateDescriptor<Long> valueStateDescriptor = new ValueStateDescriptor<Long>("value_state_descriptor_359", Long.class);
         StateTtlConfig stateTtlConfig = StateTtlConfig
-                //todo 这个有效时间可以自动清空状态变量？？？
                 //.newBuilder(org.apache.flink.api.common.time.Time.days(1))
                 .newBuilder(org.apache.flink.api.common.time.Time.seconds(2))
                 .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
@@ -269,6 +267,7 @@ public class FlinkPractice {
                                  */
                                 /**
                                  网上、书上都喜欢从open方法里拿Keyed State 这里发现每次重新get也可以(测试过MapState ValueState)
+                                 open只会执行一次，日志里看到多次是并行度n个实例打印出来的
                                  ValueState<Long> longValueState1 = context.globalState().getState(valueStateDescriptor);
                                  longValueState1.update(longValueState1.value() == null ? size: longValueState1.value() + size);
                                  valueState.update(valueState.value() == null ? size : valueState.value() + size);
@@ -302,14 +301,6 @@ public class FlinkPractice {
                         });
     }
 
-    //todo 1天失效是创建之时开始，还是固定0点？ 设置2分钟失效，能否观测到失效？需要在流式数据测试中调试
-     //MapStat中维护大量数据
-     public static final String pageOnTimeCnt = "pageOnTimeCnt";// - 最简单的计数
-     public static final String spxqyPageOnCnt = "spxqyPageOnCnt";// - 条件简单计数
-     public static final String pageTypeCnt = "pageTypeCnt";// - 历史枚举计数
-     public static final String pageOnTimeSum = "pageOnTimeSum";// - 简单interval累计
-     public static final String activityPageOnTime = "activityPageOnTime";// - 条件interval累计
-
     public static void main(String[] args) throws Exception{
         KeyedStream<MarsMobilePage4AScore, Long> keyedStream = getKeyedStream();
         //DataStream<MarsMobilePage4AScore> operator = aggregateOperator(keyedStream);
@@ -319,7 +310,7 @@ public class FlinkPractice {
         //是不是可以一个keyStream分别走两条流水线，一个计算次数，一个计算时长？？？
 
         SingleOutputStreamOperator<AScoreVariablesResult> operator =
-                keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(30)))
+                keyedStream.window(EventTimeSessionWindows.withGap(Time.seconds(90)))
                         //todo 如果使用了触发器提升计算的实时性，重复触发了咋办？
                 .process(new WphAScoreVariablesWindowFunction());
         /**

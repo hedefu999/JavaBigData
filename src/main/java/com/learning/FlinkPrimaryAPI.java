@@ -21,6 +21,7 @@ import org.apache.flink.api.common.functions.MapPartitionFunction;
 import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.io.FileInputFormat;
 import org.apache.flink.api.common.io.OutputFormat;
 import org.apache.flink.api.common.io.RichOutputFormat;
@@ -46,6 +47,7 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.aggregation.Aggregations;
+import org.apache.flink.api.java.functions.FunctionAnnotation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.io.CsvInputFormat;
 import org.apache.flink.api.java.io.jdbc.JDBCInputFormat;
@@ -122,6 +124,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.net.URL;
@@ -963,7 +967,7 @@ public class FlinkPrimaryAPI {
 							ValueStateDescriptor<Long> minimumDescriptor = new ValueStateDescriptor<>("计算最小值", Long.class);
 							//Querable State 将状态变量暴露出来允许业务系统查询 [3305]
 							minimumDescriptor.setQueryable("minmum_querable_state");
-							//通过RuntimeContext拿到Stat: todo RuntimeContext是怎么找到descriptor的？万一有多个Long类型的ValueStateDescriptor呢？？？
+							//通过RuntimeContext拿到Stat:
 							minmumValueStat = getRuntimeContext().getState(minimumDescriptor);
 							//getRuntimeContext().getReducingState(new ReducingStateDescriptor<?>(...))
 							//getRuntimeContext().getMapState(new MapStateDescriptor<String, Long>("用户1天的统计量",String.class, Long.class));
@@ -1426,7 +1430,8 @@ public class FlinkPrimaryAPI {
 						students.join(address).where("f0").equalTo(0);
 				JoinFunction<Tuple3<Long, String, Integer>,
 						Tuple3<Long, String, String>,
-						Tuple3<Long, String, String>> chooseSelectedFields = new JoinFunction<>() {
+						Tuple3<Long, String, String>> chooseSelectedFields = new JoinFunction<Tuple3<Long, String, Integer>, //java 11 可以推断这里的类型，java8会报错
+																								Tuple3<Long, String, String>,Tuple3<Long, String, String>>() {
 					@Override
 					public Tuple3<Long, String, String> join(Tuple3<Long, String, Integer> first,
 															 Tuple3<Long, String, String> second) throws Exception {
@@ -1460,7 +1465,8 @@ public class FlinkPrimaryAPI {
 				 */
 				FlatJoinFunction<Tuple3<Long, String, Integer>,
 						Tuple3<Long, String, String>,
-						Tuple3<Long, String, String>> flatJoinFunction = new FlatJoinFunction<>() {
+						Tuple3<Long, String, String>> flatJoinFunction = new FlatJoinFunction<Tuple3<Long, String, Integer>,
+																								Tuple3<Long, String, String>, Tuple3<Long, String, String>>() {
 					@Override
 					public void join(Tuple3<Long, String, Integer> first,
 									 Tuple3<Long, String, String> second,
@@ -1700,12 +1706,124 @@ public class FlinkPrimaryAPI {
 		}
 		/*
 		# 广播变量与分布式缓存
-
 		 */
 		static class BroadcastData{
-
+			static void broadcastData(){
+				DataSource<Integer> dataSource = batchEnv.fromElements(1, 2, 3);
+				//withBroadcastSet方法的 数据集必须在广播前已经创建完毕、广播变量的名称需要在当前应用中唯一
+				dataSource.map(null).withBroadcastSet(dataSource,"unique_broadcast_name");
+				//使用广播变量：从RuntimeContext中取
+				batchEnv.generateSequence(1,10)
+						.map(new RichMapFunction<Long, String>() {
+							List<Long> broadcastData = null;
+							@Override
+							public String map(Long value) throws Exception {
+								return "对应元素" + broadcastData.get(value.intValue());
+							}
+							@Override
+							public void open(Configuration parameters) throws Exception {
+								broadcastData = getRuntimeContext().<Long>getBroadcastVariable("unique_broadcast_name");
+							}
+						});
+			}
+			//从文件注册缓存
+			static void distributionCache(){
+				//缓存名称要在应用内唯一，使用时通过RuntimeContext像获取广播变量那样使用这个唯一名称获取缓存
+				batchEnv.registerCachedFile("hdfs:///path/file","unique_distri_cache_name");
+				//第三个参数指定 文件可执行
+				batchEnv.registerCachedFile("","",true);
+				batchEnv.generateSequence(1,10)
+						.map(new RichMapFunction<Long, String>() {
+							File file = null;
+							@Override
+							public String map(Long value) throws Exception {
+								FileInputStream fileInputStream = new FileInputStream(file);
+								return null;
+							}
+							@Override
+							public void open(Configuration parameters) throws Exception {
+								file = getRuntimeContext().getDistributedCache().getFile("unique_distri_cache_name");
+							}
+						});
+				//使用完缓存文件后，flink会自动从本地文件系统中删除
+			}
 		}
 
+		/*
+		# 语义注解
+		加个注解看不出有啥惊人的效果
+		也就ReadFields有点用途，减少不必要的数据传输，提升性能
+		注意这里是DataSet API
+		 */
+		static class SemanticAnnotation{
+			/*
+			转发字段 - Forwarded Fields 代表数据从Function进入后，对指定为Forwarded的Fields不进行修改
+			另外还有 @ForwardedFieldsFirst @ForwardedFieldsSecond
+			 */
+			//函数注解方式
+			//输入的Tuple2的第一个字段f0直接作为输出的Tuple2的第二个字段f1进行返回，所以此时使用ForwardedFields进行提示
+			@FunctionAnnotation.ForwardedFields("f0->f1")
+			static class MyMapper implements MapFunction<Tuple2<Integer,Double>,Tuple2<Double,Integer>>{
+				@Override
+				public Tuple2<Double, Integer> map(Tuple2<Integer, Double> value) throws Exception {
+					return Tuple2.of(value.f1/2, value.f0);
+				}
+			}
+			//算子参数方式
+			static void withForwardedFields(){
+				DataSource<Tuple3<Long, String, String>> aSource = batchEnv.fromElements(Tuple3.of(120L, "a", "b"));
+				DataSource<Tuple3<Long, Integer, String>> bSource = batchEnv.fromElements(Tuple3.of(130L, 12, "c"));
+				aSource.join(bSource).where("f0").equalTo(0)
+						.with(new JoinFunction<Tuple3<Long, String, String>, Tuple3<Long, Integer, String>, Tuple2<Long,String>>() {
+							@Override
+							public Tuple2<Long, String> join(Tuple3<Long, String, String> first, Tuple3<Long, Integer, String> second) throws Exception {
+								return null;
+							}
+						}).withForwardedFieldsSecond("");
+			}
+			/*
+			表达式 f1;f3 表示输入函数的Input对象中，第二个和第四个字段在函数计算过程中产生，其余字段全部按照原来位置进行输出
+			 */
+			@FunctionAnnotation.NonForwardedFields("_2")
+			static class MyMapper2 implements MapFunction<Tuple3<String, Long, Integer>, Tuple3<String, Long, Integer>> {
+				@Override
+				public Tuple3<String, Long, Integer> map(Tuple3<String, Long, Integer> value) throws Exception {
+					return Tuple3.of(value.f0, (value.f1 + value.f2)/2, value.f2);
+				}
+			}
+			static void nonForwardedFields(){
+			}
+			/*
+			Read Fields注解 函数会读取哪些字段进行处理
+			 */
+			@FunctionAnnotation.ReadFields("f0;f2")
+			static class MyMapper3 implements MapFunction<Tuple4<Integer,Integer,Double,Integer>,Tuple2<Integer,Double>>{
+				@Override
+				public Tuple2<Integer, Double> map(Tuple4<Integer, Integer, Double, Integer> value) throws Exception {
+					if (value.f0 == 12){
+						return Tuple2.of(value.f0,value.f2);
+					} else {
+						return Tuple2.of(value.f1+10, value.f2);
+					}
+				}
+			}
+			/*
+			多输入函数 如 JoinFunction CoGroup 等，可以使用 ReadFieldsFirst ReadFieldsSecond 注解
+			类似的还有 NonForwardedFieldsFirst NonForwardedFieldsSecond
+			 */
+			@FunctionAnnotation.ReadFieldsFirst("f0;f1")
+			@FunctionAnnotation.ReadFieldsSecond("f0")
+			static class MyMapper4 implements JoinFunction<Tuple4<Integer,Integer,Double,Integer>,Tuple2<Integer,Double>,String>{
+				@Override
+				public String join(Tuple4<Integer, Integer, Double, Integer> first, Tuple2<Integer, Double> second) throws Exception {
+					return null;//...
+				}
+			}
+			/*
+			一旦使用了Read Fields注解，函数中所有参与计算的字段必须在注解中指明，否则会导致计算函数执行失败
+			函数未使用的字段也被Read Fields 注解声明了，不会有任何问题
+			 */
+		}
 		public static void main(String[] args) throws Exception{
 			simpleWordCount();
 		}
