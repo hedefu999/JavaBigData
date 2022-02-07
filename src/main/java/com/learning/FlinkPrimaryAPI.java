@@ -116,6 +116,10 @@ import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
+import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.java.BatchTableEnvironment;
+import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.StringValue;
 import org.apache.flink.util.Collector;
@@ -152,6 +156,8 @@ public class FlinkPrimaryAPI {
 	static Logger logger = LoggerFactory.getLogger("StreamingJob");
 	static StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
 	static ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
+	static final StreamTableEnvironment tableStreamEnv = TableEnvironment.getTableEnvironment(streamEnv);
+	static final BatchTableEnvironment tableBatchEnv = TableEnvironment.getTableEnvironment(batchEnv);
 
 	static class FlinkProgrammeStructure{
 		static ExecutionEnvironment dataSetEnv = ExecutionEnvironment.getExecutionEnvironment();
@@ -1828,6 +1834,36 @@ public class FlinkPrimaryAPI {
 			simpleWordCount();
 		}
 	}
+
+	/*
+	关系型编程接口 Table API 及 SQL API
+	Table/SQL API 可以统一处理批量和实时计算业务，实现流批一体
+	Flink SQL 基于 Apache Calcite 框架实现了SQL标准协议，是构建在Table API上的更高级接口
+	 */
+	static class AbountTableSQLAPI{
+		public static void main(String[] args) {
+			//如何获取Table Environment
+			StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+			StreamTableEnvironment tableStreamEnv = TableEnvironment.getTableEnvironment(streamEnv);
+			//批处理应用如何获取Table Environment
+			ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
+			BatchTableEnvironment tableBatchEnv = TableEnvironment.getTableEnvironment(batchEnv);
+		}
+		/*
+		注册相应的数据源和数据表信息，所有对数据库和表的元数据信息存放在FLink CataLog 内部目录结构中，
+		存放了Flink内部所有与Table相关的元数据信息，包括表结构信息、数据源信息
+		注册在CataLog中的Table类似关系型数据库的视图结构，当注册的表被引用和查询时数据才会在对应的Table中生成
+		需要注意：多个语句同时查询一张表时，表中的数据会被执行多次，且每次查询出来的结果相互之间不共享
+		 */
+		static class AboutCataLogRegistration{
+			static void registerTable(){
+				Table table = tableStreamEnv.scan("SourceTable").select("null");
+				//projectedTable 注册在CataLog中的表名，第二个参数是table对象
+				tableStreamEnv.registerTable("projectedTable", table);
+			}
+		}
+	}
+
 	/*
 	获取类路径
 	 */
