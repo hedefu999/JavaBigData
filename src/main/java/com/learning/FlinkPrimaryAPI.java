@@ -91,6 +91,7 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
@@ -120,6 +121,9 @@ import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.java.BatchTableEnvironment;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
+import org.apache.flink.table.catalog.InMemoryExternalCatalog;
+import org.apache.flink.table.sinks.CsvTableSink;
+import org.apache.flink.table.sources.CsvTableSource;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.StringValue;
 import org.apache.flink.util.Collector;
@@ -139,6 +143,8 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
@@ -499,6 +505,40 @@ public class FlinkPrimaryAPI {
 			public static void main(String[] args) throws Exception{
 				show();
 				streamEnv.execute("data_sink_no_001");
+			}
+		}
+
+		/*
+		定时器功能
+		在onTimer中执行定时任务内容，并注册下一次触发时间，周而复始
+		onTimer会被flink回调
+		 */
+		static class AboutTimer{
+			public static void main(String[] args) {
+				DataStreamSource<Tuple3<Long, String, Integer>> source = streamEnv.fromElements(Tuple3.of(12L, "jack", 24));
+				KeyedStream<Tuple3<Long, String, Integer>, Long> keyedStream = source.keyBy(item -> item.f0);
+				keyedStream.process(new KeyedProcessFunction<Long, Tuple3<Long, String, Integer>, Tuple3<Long, String, Integer>>() {
+					boolean first = true;
+					@Override
+					public void processElement(Tuple3<Long, String, Integer> value, Context ctx, Collector<Tuple3<Long, String, Integer>> out) throws Exception {
+						if (first){
+							long nextTime = Instant.ofEpochMilli(ctx.timestamp()).atZone(ZoneId.systemDefault()).withHour(0).plusDays(1).toInstant().toEpochMilli();
+							ctx.timerService().registerEventTimeTimer(nextTime);
+						}
+						//process
+						out.collect(value);
+					}
+					@Override
+					public void open(Configuration parameters) throws Exception {
+						//初始化
+					}
+					@Override
+					public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple3<Long, String, Integer>> out) throws Exception {
+						//执行定时器任务
+						long nextTime = Instant.ofEpochMilli(ctx.timestamp()).atZone(ZoneId.systemDefault()).withHour(0).plusDays(1).toInstant().toEpochMilli();
+						ctx.timerService().registerEventTimeTimer(nextTime);
+					}
+				});
 			}
 		}
 	}
@@ -1850,16 +1890,59 @@ public class FlinkPrimaryAPI {
 			BatchTableEnvironment tableBatchEnv = TableEnvironment.getTableEnvironment(batchEnv);
 		}
 		/*
+		flink cataLog进行元数据的管理
 		注册相应的数据源和数据表信息，所有对数据库和表的元数据信息存放在FLink CataLog 内部目录结构中，
 		存放了Flink内部所有与Table相关的元数据信息，包括表结构信息、数据源信息
 		注册在CataLog中的Table类似关系型数据库的视图结构，当注册的表被引用和查询时数据才会在对应的Table中生成
 		需要注意：多个语句同时查询一张表时，表中的数据会被执行多次，且每次查询出来的结果相互之间不共享
 		 */
 		static class AboutCataLogRegistration{
-			static void registerTable(){
+			/*
+			通过内部CataLog注册一些信息
+			 */
+			static void registerTableByInnerCataLog(){
 				Table table = tableStreamEnv.scan("SourceTable").select("null");
 				//projectedTable 注册在CataLog中的表名，第二个参数是table对象
 				tableStreamEnv.registerTable("projectedTable", table);
+
+				//使用csv文件注册一个Table Source
+				String[] columns = {"name","age","time"};
+				TypeInformation<Object>[] types = new TypeInformation[]{TypeInformation.of(String.class), TypeInformation.of(Integer.class), TypeInformation.of(Long.class)};
+				CsvTableSource csvTableSource = new CsvTableSource("/path/to/file", columns, types);
+				tableStreamEnv.registerTableSource("myFirstTableSource", csvTableSource);
+
+				//TableSink的注册：将结果写入Csv文件
+				CsvTableSink csvTableSink = new CsvTableSink("path/csvFile", ",");
+				tableStreamEnv.registerTableSink("myfisrtTableSink",columns,types, csvTableSink);
+			}
+			/*
+			通过外部CataLog注册信息
+			除了使用Flink内部的CataLog作为所有Table数据的元数据的存储介质外，也可以使用外部CataLog
+			Table/SQL API可以将临时表注册在外部CataLog中
+			 */
+			static void registerTableSourceByExternalCataLog(){
+				//注册一个基于内存的外部CataLog
+				InMemoryExternalCatalog externalCatalog = new InMemoryExternalCatalog("myfirstInMemoryExternalCatalog");
+				tableStreamEnv.registerExternalCatalog("registeredInMemCataLog", externalCatalog);
+			}
+			/*
+			Table API是构建在DataStream API和DataSet API上的一层更高级的抽象，因此可以灵活地使用Table API将Table转成DataStream或DataSet数据集
+			也可以将DataStream或DataSet数据集转换成Table，这类似Spark中的DataFrame和RDD
+			 */
+			static void convertBetweenDataStreamSetAndTable(){
+				//DataStream/ DataSet --注册成--> Table
+				DataStreamSource<Tuple3<Long, String, Integer>> streamSource = streamEnv.fromElements(Tuple3.of(12L, "name", 13));
+				//将DataStream注册成Table，指定表名并使用DataStream中的全部字段作为表字段
+				//注册的表名必须在应用内唯一
+				tableStreamEnv.registerDataStream("unique_table_1", streamSource);//register方法没有返回
+				//如果只需要部分字段作为表字段，可以通过一个String传递
+				tableStreamEnv.registerDataStream("unique_table_2", streamSource, "f0,f1");
+
+				//DataStream / DataSet --转换成--> Table
+				Table table1 = tableStreamEnv.fromDataStream(streamSource);
+				Table table2 = tableStreamEnv.fromDataStream(streamSource, "f0,f2");
+
+				//
 			}
 		}
 	}
