@@ -72,6 +72,7 @@ import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.typeutils.RowTypeInfo;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
@@ -116,14 +117,27 @@ import org.apache.flink.streaming.api.windowing.triggers.Trigger;
 import org.apache.flink.streaming.api.windowing.triggers.TriggerResult;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
+import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
+import org.apache.flink.table.api.QueryConfig;
+import org.apache.flink.table.api.StreamQueryConfig;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.java.BatchTableEnvironment;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.table.catalog.InMemoryExternalCatalog;
+import org.apache.flink.table.descriptors.Csv;
+import org.apache.flink.table.descriptors.Json;
+import org.apache.flink.table.descriptors.Kafka;
+import org.apache.flink.table.descriptors.Rowtime;
+import org.apache.flink.table.descriptors.Schema;
+import org.apache.flink.table.descriptors.StreamTableDescriptor;
+import org.apache.flink.table.expressions.Expression;
+import org.apache.flink.table.expressions.ResolvedFieldReference;
 import org.apache.flink.table.sinks.CsvTableSink;
 import org.apache.flink.table.sources.CsvTableSource;
+import org.apache.flink.table.sources.tsextractors.TimestampExtractor;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.StringValue;
 import org.apache.flink.util.Collector;
@@ -1877,8 +1891,6 @@ public class FlinkPrimaryAPI {
 
 	/*
 	关系型编程接口 Table API 及 SQL API
-	Table/SQL API 可以统一处理批量和实时计算业务，实现流批一体
-	Flink SQL 基于 Apache Calcite 框架实现了SQL标准协议，是构建在Table API上的更高级接口
 	 */
 	static class AbountTableSQLAPI{
 		public static void main(String[] args) {
@@ -1930,19 +1942,178 @@ public class FlinkPrimaryAPI {
 			也可以将DataStream或DataSet数据集转换成Table，这类似Spark中的DataFrame和RDD
 			 */
 			static void convertBetweenDataStreamSetAndTable(){
-				//DataStream/ DataSet --注册成--> Table
 				DataStreamSource<Tuple3<Long, String, Integer>> streamSource = streamEnv.fromElements(Tuple3.of(12L, "name", 13));
+				DataSource<Tuple3<Long, String, Integer>> setSource = batchEnv.fromElements(Tuple3.of(12L, "name", 13));
+
+				//## DataStream/ DataSet --注册成--> Table
 				//将DataStream注册成Table，指定表名并使用DataStream中的全部字段作为表字段
 				//注册的表名必须在应用内唯一
 				tableStreamEnv.registerDataStream("unique_table_1", streamSource);//register方法没有返回
 				//如果只需要部分字段作为表字段，可以通过一个String传递
 				tableStreamEnv.registerDataStream("unique_table_2", streamSource, "f0,f1");
 
-				//DataStream / DataSet --转换成--> Table
+				//## DataStream / DataSet --转换成--> Table
 				Table table1 = tableStreamEnv.fromDataStream(streamSource);
-				Table table2 = tableStreamEnv.fromDataStream(streamSource, "f0,f2");
+				Table table2 = tableStreamEnv.fromDataStream(streamSource, "f0,f2");//只要部分字段
 
-				//
+				//## DataSet 注册成 Table（表名必须唯一,无返回）
+				tableBatchEnv.registerDataSet("tableName", setSource);
+				tableBatchEnv.registerDataSet("tableName", setSource, "f0,f2");
+
+				//## DataSet 转换成 Table
+				Table table3 = tableBatchEnv.fromDataSet(setSource);
+				Table table4 = tableBatchEnv.fromDataSet(setSource, "f0,f1");
+
+				//## Table 转换成 DataStream
+				DataStream<Tuple3<Long, String, Integer>> dataStream = tableStreamEnv.toAppendStream(table1,
+						TypeInformation.of(new TypeHint<Tuple3<Long, String, Integer>>() {
+				}));
+				// ### 直接转成Row格式可以临时回避繁琐的类型信息
+				DataStream<Row> rowDataStream = tableStreamEnv.toAppendStream(table1, Row.class);
+				// 使用retract模式转换table,第一个字段必须是Boolean
+				StreamQueryConfig streamQueryConfig = new StreamQueryConfig();
+				streamQueryConfig.withIdleStateRetentionTime(null, null);
+				//返回的Boolean字段表示数据更新类型，true表示insert操作更新的数据，false表示delete操作更新的数据
+				DataStream<Tuple2<Boolean, Tuple3<Boolean, Long, String>>> retractStream1 = tableStreamEnv.toRetractStream(table1,
+						TypeInformation.of(new TypeHint<Tuple3<Boolean, Long, String>>() {
+						}), streamQueryConfig);
+
+				//Table 转换成 DataSet
+				DataSet<Row> dataSet = tableBatchEnv.toDataSet(table3, Row.class);
+			}
+			/*
+			schema 字段映射
+			Position-Based 字段位置映射
+			 */
+			static void schemaFieldsMapping(){
+				String fields = "f1,f2";
+				fields = "_1,_2";
+				fields = "f0 as id,f1 as name, f2 as age"; //pojo 类型与此类似
+				Table table = tableStreamEnv.fromDataStream(streamEnv.fromElements(Tuple3.of(12L, "name", 13)), fields);
+			}
+		}
+		//# 外部连接器
+		/*
+		Table Connector
+		Flink中内置的Table Connector有 File System Connector、Kafka Connector、Elasticsearch Connector
+		 */
+		static class TableConnector{
+			/*
+			各种类型的Connector
+			 */
+			public static class CustomFlinkKafkaPartitioner extends FlinkKafkaPartitioner<Tuple3<Long,String,Integer>>{
+				@Override
+				public int partition(Tuple3<Long, String, Integer> record, byte[] key, byte[] value, String targetTopic, int[] partitions) {
+					//一个记录写入到kafka哪个分区上在这里指定
+					return 0;
+				}
+			}
+			static void tableConnector(){
+				//FileConnector
+				tableStreamEnv.connect(new org.apache.flink.table.descriptors.FileSystem().path("/path/fileName"));
+				//KafkaConnector
+				//需要添加 flink-connector-kafka 依赖，官方资料 https://nightlies.apache.org/flink/flink-docs-master/docs/connectors/datastream/kafka/
+				//资料里提到一个KafkaSource的API   KafkaSource.builder().setTopics("topic").build()
+				Kafka kafka = new Kafka().version("0.10")
+						.topic("topic")
+						.property("zookeeper.connect", "127.0.0.1:2181")
+						.property("bootstrap.servers", "127.0.0.1:9092")
+						.property("group.id", "group_id")
+						//指定启动时Kafka的消费模式：offset如何确定
+						.startFromEarliest() // 从最早的offset开始消费
+						.startFromLatest() //从最新的offset开始消费
+						.startFromSpecificOffset(3, new Date().getTime()) //从指定的offset开始消费
+						//向Kafka中写入数据时 指定Flink和Kafka的数据分区策略
+						.sinkPartitionerFixed() //每个Flink分区最多被分配到一个Kafka分区上
+						.sinkPartitionerRoundRobin() //Flink中分区随机映射到Kafka分区上
+						.sinkPartitionerCustom(CustomFlinkKafkaPartitioner.class);//使用class传递自定义分区规则
+				tableStreamEnv.connect(kafka);
+			}
+			static void tableFormat(){
+				StreamTableDescriptor streamTableDescriptor = tableStreamEnv.connect(new Kafka().topic(""));
+				//对于Stream类型的Table数据，需要标记出是 INSERT UPDATE DELETE 中的哪种操作更新的数据
+				streamTableDescriptor.inAppendMode(); //仅交互 INSERT 操作更新的数据
+				streamTableDescriptor.inUpsertMode(); //仅交互 INSERT UPDATE DELETE 操作更新的数据
+				streamTableDescriptor.inRetractMode();//仅交互 INSERT DELETE 操作更新的数据
+				StreamTableDescriptor streamTableDescriptor1 = streamTableDescriptor.inAppendMode();
+				StreamTableDescriptor streamTableDescriptorLast = streamTableDescriptor1.withFormat(
+						new Csv()
+							.field("id", org.apache.flink.api.common.typeinfo.Types.LONG)
+							.field("name", org.apache.flink.api.common.typeinfo.Types.STRING)
+							.fieldDelimiter(",")
+							.lineDelimiter("\n")
+							.quoteCharacter('*')
+							.commentPrefix("#")
+							.ignoreFirstLine() //是否忽略 headLine
+							.ignoreParseErrors() //是否忽略解析错误
+				).withSchema(//使用Table Schema 定义字段，flink json format 的schema方法已废弃，使用这里的API
+						new Schema()
+								.field("id_alias", TypeInformation.of(Long.class))
+								//Table Schema中字段出现的顺序必须与Input/Output数据源中的字段顺序一致
+								.field("name_alias", TypeInformation.of(String.class))
+				);
+				/*
+				三种方式定义JSON Format, JSON Format从table schema 中产生
+				Json的包名：org.apache.flink.table.descriptors
+				 */
+				streamTableDescriptor1.withFormat(
+						new Json()
+						.failOnMissingField(false)
+						.schema(null)
+						.jsonSchema("") //这个字符串相当恶心，是该弃用
+						.deriveSchema()
+						.ignoreParseErrors(false)
+				);
+				//Table Schema支持复杂的字段映射和特殊的时间获取
+				streamTableDescriptor1.withSchema(
+						new Schema()
+						.field("Field1", org.apache.flink.api.common.typeinfo.Types.SQL_TIMESTAMP)
+								.proctime() //获取Process Time
+						.field("Field2", org.apache.flink.api.common.typeinfo.Types.SQL_TIMESTAMP)
+								.rowtime(null) //获取Event Time
+						.field("Field3", org.apache.flink.api.common.typeinfo.Types.BOOLEAN)
+								.from("origin_field_name") //从Input/Output数据指定字段中获取数据
+				);
+				//rowtime获取EventTime需要这样写：
+				streamTableDescriptor1.withSchema(
+						new Schema()
+						.field("", org.apache.flink.api.common.typeinfo.Types.SQL_TIMESTAMP)
+						.rowtime( //如何获取Event Time
+								new Rowtime()
+								.timestampsFromField("page_start_time") //根据字段名称从输入数据中提取
+								.timestampsFromSource() //从底层DataStream API中转换而来，数据源需要支持分配时间戳（Kafka 0.10+）
+								.timestampsFromExtractor(null) //需要实现一个 TimestampExtractor
+						).rowtime( //指定Watermark策略
+								new Rowtime() //下面3个方法选一个
+								.watermarksPeriodicBounded(5000) //设置Watermark
+								.watermarksPeriodicAscending() //和rowtime最大时间保持一致
+								.watermarksFromSource() //使用底层DataStream API内建的Watermark
+						)
+				);
+
+
+			}
+
+			/*
+			# 实用案例：Kafka Table Connector
+			 */
+			public static void main(String[] args) {
+				tableStreamEnv.connect(
+						new Kafka()
+						.version("0.10") //kafka消息版本
+						.topic("test-topic")
+						.startFromEarliest()
+						.property("zookeeper.connect", "localhost:2181")
+						.property("bootstrap.servers", "localhost:9092")
+				).withFormat(
+						new Json()
+						.failOnMissingField(true)
+						.ignoreParseErrors(true)
+				).withSchema(
+						new Schema()
+						.field("id", org.apache.flink.api.common.typeinfo.Types.LONG)
+						.field("name", org.apache.flink.api.common.typeinfo.Types.STRING)
+				).inAppendMode().registerTableSource("KafkaInputTable");
 			}
 		}
 	}
