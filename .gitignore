@@ -1,4 +1,5 @@
 /.idea/
-/BigData.iml
+/*.iml
+*.iml
 /target/
 *.DS_Store
