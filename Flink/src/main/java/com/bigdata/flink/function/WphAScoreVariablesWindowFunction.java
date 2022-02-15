@@ -1,12 +1,9 @@
-package com.learning.function;
+package com.bigdata.flink.function;
 
-import com.learning.pojos.AScoreVariablesResult;
-import com.learning.pojos.MarsMobilePage4AScore;
+import com.bigdata.flink.pojos.AScoreVariablesResult;
+import com.bigdata.flink.pojos.MarsMobilePage4AScore;
 import org.apache.commons.compress.utils.Sets;
 import org.apache.flink.api.common.functions.RuntimeContext;
-import org.apache.flink.api.common.state.ListState;
-import org.apache.flink.api.common.state.MapState;
-import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
@@ -20,13 +17,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.time.temporal.ChronoField;
-import java.time.temporal.TemporalField;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.stream.Collectors;

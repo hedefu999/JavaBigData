@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-package com.learning;
+package com.bigdata.flink;
 
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.LocalEnvironment;

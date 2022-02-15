@@ -1,6 +1,5 @@
-package com.learning.pojos;
+package com.bigdata.flink.pojos;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 
 import java.time.LocalDateTime;

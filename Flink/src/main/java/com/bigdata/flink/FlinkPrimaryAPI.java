@@ -1,8 +1,8 @@
-package com.learning;
+package com.bigdata.flink;
 
-import com.learning.pojos.PageEvent;
-import com.learning.pojos.Person;
-import com.learning.pojos.ViewEvent;
+import com.bigdata.flink.pojos.PageEvent;
+import com.bigdata.flink.pojos.Person;
+import com.bigdata.flink.pojos.ViewEvent;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -72,7 +72,6 @@ import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.typeutils.RowTypeInfo;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
@@ -95,7 +94,6 @@ import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SocketClientSink;
 import org.apache.flink.streaming.api.functions.source.FileProcessingMode;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
@@ -119,11 +117,9 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
-import org.apache.flink.table.api.QueryConfig;
 import org.apache.flink.table.api.StreamQueryConfig;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
-import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.java.BatchTableEnvironment;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
 import org.apache.flink.table.catalog.InMemoryExternalCatalog;
@@ -133,11 +129,8 @@ import org.apache.flink.table.descriptors.Kafka;
 import org.apache.flink.table.descriptors.Rowtime;
 import org.apache.flink.table.descriptors.Schema;
 import org.apache.flink.table.descriptors.StreamTableDescriptor;
-import org.apache.flink.table.expressions.Expression;
-import org.apache.flink.table.expressions.ResolvedFieldReference;
 import org.apache.flink.table.sinks.CsvTableSink;
 import org.apache.flink.table.sources.CsvTableSource;
-import org.apache.flink.table.sources.tsextractors.TimestampExtractor;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.StringValue;
 import org.apache.flink.util.Collector;
@@ -370,7 +363,7 @@ public class FlinkPrimaryAPI {
 				//1. 简单地从纯文本文件读取
 				//DataStreamSource<String> source = streamEnv.readTextFile("");
 				//2. 从csv文件读取内容
-				String csvFilePath = "/Users/hedefu/Documents/Developer/IDEA/JavaStack/JavaBigData/src/main/resources/file/testcsv.csv";
+				String csvFilePath = "/Users/hedefu/Documents/Developer/IDEA/JavaStack/BigData/src/main/resources/file/testcsv.csv";
 				Path path = new Path(csvFilePath);
 				CsvInputFormat<String> csvInputFormat = new CsvInputFormat<String>(path) {
 					@Override

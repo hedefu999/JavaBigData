@@ -1,6 +1,5 @@
-package com.learning.pojos;
+package com.bigdata.flink.pojos;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 
 import java.time.Instant;
@@ -9,7 +8,6 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoField;
-import java.util.Date;
 
 @Data
 public class MarsMobilePage4AScore implements Comparable<MarsMobilePage4AScore>{

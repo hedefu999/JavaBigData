@@ -1,7 +1,7 @@
-package com.learning;
+package com.bigdata.flink;
 
-import com.learning.pojos.PageEvent;
-import com.learning.pojos.ViewEvent;
+import com.bigdata.flink.pojos.PageEvent;
+import com.bigdata.flink.pojos.ViewEvent;
 
 import java.util.Arrays;
 import java.util.List;

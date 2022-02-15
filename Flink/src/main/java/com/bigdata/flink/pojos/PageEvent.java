@@ -1,14 +1,11 @@
-package com.learning.pojos;
+package com.bigdata.flink.pojos;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeFormatterBuilder;
-import java.time.temporal.TemporalField;
 
 @Data @NoArgsConstructor
 public class PageEvent {
