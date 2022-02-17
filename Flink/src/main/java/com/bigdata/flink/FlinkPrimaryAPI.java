@@ -9,6 +9,9 @@ import lombok.NoArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.TimestampAssigner;
+import org.apache.flink.api.common.eventtime.TimestampAssignerSupplier;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.FilterFunction;
@@ -40,6 +43,7 @@ import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
@@ -117,11 +121,17 @@ import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.streaming.connectors.kafka.partitioner.FlinkKafkaPartitioner;
 import org.apache.flink.streaming.runtime.operators.windowing.TimestampedValue;
+import org.apache.flink.table.api.OverWindow;
 import org.apache.flink.table.api.StreamQueryConfig;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
+import org.apache.flink.table.api.TableSchema;
+import org.apache.flink.table.api.TumbleWithSize;
+import org.apache.flink.table.api.TumbleWithSizeOnTimeWithAlias;
+import org.apache.flink.table.api.WindowedTable;
 import org.apache.flink.table.api.java.BatchTableEnvironment;
 import org.apache.flink.table.api.java.StreamTableEnvironment;
+import org.apache.flink.table.api.java.Tumble;
 import org.apache.flink.table.catalog.InMemoryExternalCatalog;
 import org.apache.flink.table.descriptors.Csv;
 import org.apache.flink.table.descriptors.Json;
@@ -131,6 +141,11 @@ import org.apache.flink.table.descriptors.Schema;
 import org.apache.flink.table.descriptors.StreamTableDescriptor;
 import org.apache.flink.table.sinks.CsvTableSink;
 import org.apache.flink.table.sources.CsvTableSource;
+import org.apache.flink.table.sources.DefinedRowtimeAttributes;
+import org.apache.flink.table.sources.RowtimeAttributeDescriptor;
+import org.apache.flink.table.sources.StreamTableSource;
+import org.apache.flink.table.sources.tsextractors.ExistingField;
+import org.apache.flink.table.sources.wmstrategies.AscendingTimestamps;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.StringValue;
 import org.apache.flink.util.Collector;
@@ -153,6 +168,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -2109,6 +2125,95 @@ public class FlinkPrimaryAPI {
 				).inAppendMode().registerTableSource("KafkaInputTable");
 			}
 		}
+
+		static class TableTimeConcepts{
+			static void test(){
+				DataStreamSource<Tuple3<Long, String, Long>> inputStream = streamEnv.fromElements(Tuple3.of(16345385793L, "query_goods", 12343L));
+				//在DataStream转换Table过程中定义Event Time字段
+				WatermarkStrategy<Tuple3<Long, String, Long>> watermarkStrategy = WatermarkStrategy.<Tuple3<Long, String, Long>>forBoundedOutOfOrderness(Duration.ofSeconds(6))
+						.withTimestampAssigner(new SerializableTimestampAssigner<Tuple3<Long, String, Long>>() {
+							@Override
+							public long extractTimestamp(Tuple3<Long, String, Long> element, long recordTimestamp) {
+								return element.f0;
+							}
+						});
+				SingleOutputStreamOperator<Tuple3<Long, String, Long>> watermarkStream =
+						inputStream.assignTimestampsAndWatermarks(watermarkStrategy);
+				Table table = tableStreamEnv.fromDataStream(watermarkStream, "f0,f1,f2");
+				//table.window(null);
+			}
+		}
+		//一个相对完整的stream转table示例
+		static class TableSource{
+			static class MyStreamTableSource implements DefinedRowtimeAttributes, StreamTableSource<Row> {
+				@Override //定义Table API中的时间属性信息
+				public List<RowtimeAttributeDescriptor> getRowtimeAttributeDescriptors() {
+					//创建基于event_time的RowtimeAttributeDescriptor,确定时间属性信息
+					RowtimeAttributeDescriptor descriptor = new RowtimeAttributeDescriptor(
+							"event_time", //时间属性名称
+							new ExistingField("event_time"),
+							new AscendingTimestamps()
+					);
+					return Collections.singletonList(descriptor);
+				}
+				@Override //StreamTableSource#getDataStream() 定义输入数据源
+				public DataStream<Row> getDataStream(StreamExecutionEnvironment execEnv) {
+					//定义获取DataStream数据集的逻辑
+					DataStreamSource<Tuple3<String, String, Long>> dataStreamSource =
+							streamEnv.fromElements(Tuple3.of("Id234", "Val586", 16489734834L));
+					WatermarkStrategy<Tuple3<String, String, Long>> watermarkStrategy =
+							WatermarkStrategy.<Tuple3<String, String, Long>>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+							.withTimestampAssigner((SerializableTimestampAssigner<Tuple3<String, String, Long>>)
+									(element, recordTimestamp) -> element.f2);
+					SingleOutputStreamOperator<Row> singleOutputStreamOperator =
+							dataStreamSource.assignTimestampsAndWatermarks(watermarkStrategy).map(
+									(MapFunction<Tuple3<String, String, Long>, Row>) value ->
+											Row.of(value.f0, value.f1, value.f2));
+					return singleOutputStreamOperator;
+				}
+				@Override //定义数据集字段名称和类型
+				public TypeInformation<Row> getReturnType() {
+					String[] names = {"id","value","event_time"};
+					TypeInformation[] types = {org.apache.flink.api.common.typeinfo.Types.STRING,
+							org.apache.flink.api.common.typeinfo.Types.STRING,
+							org.apache.flink.api.common.typeinfo.Types.LONG};
+					return org.apache.flink.api.common.typeinfo.Types.ROW_NAMED(names, types);
+				}
+				@Override
+				public TableSchema getTableSchema() {
+					return TableSchema.builder()
+							.field("id", org.apache.flink.api.common.typeinfo.Types.STRING)
+							.field("value", TypeInformation.of(String.class))
+							.field("event_time", BasicTypeInfo.LONG_TYPE_INFO).build();
+				}
+				@Override
+				public String explainSource() {
+					return "tell me how to explain source!";
+				}
+			}
+
+			public static void main(String[] args) {
+				String tableName = "my_stream_table";
+				//注册输入数据源到tableEnv
+				tableStreamEnv.registerTableSource(tableName, new MyStreamTableSource());
+				//在窗口中处理输入数据 ??? todo 很奇怪的写法
+				TumbleWithSizeOnTimeWithAlias window =
+						Tumble.over("10.minutes").on("event_time").as("my_table_tumble_window");
+				tableStreamEnv.scan(tableName).window(window);
+			}
+		}
+		//ProcessTime指定
+		static class ProcessTimeAssign{
+			public static void main(String[] args) {
+				DataStreamSource<Tuple4<Long, String, Integer,Long>> streamSource =
+						streamEnv.fromElements(Tuple4.of(1245L, "jack", 12, 16234893634L));
+				//.proctime 专门用于指定哪个字段是process_time
+				Table table = tableStreamEnv.fromDataStream(streamSource, "id,name,age,birth.proctime");
+				//基于process_time时间属性创建翻滚窗口
+				WindowedTable window = table.window(Tumble.over("10.minutes").on("process_time").as("window"));
+			}
+		}
+
 	}
 
 	/*
