@@ -17,26 +17,68 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-java</artifactId>
             <version>${flink.version}</version>
-            <!--<scope>provided</scope>-->
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-streaming-java_${scala.binary.version}</artifactId>
             <version>${flink.version}</version>
-            <!--<scope>provided</scope>-->
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-scala_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-clients_${scala.binary.version}</artifactId>
             <version>${flink.version}</version>
-            <!--<scope>provided</scope>-->
+            <scope>provided</scope>
         </dependency>
+        <!-- flink table/sql api 使用的依赖 (各种依赖满天飞。。。) -->
+        <!--<dependency> 弃用此版本-->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table_${scala.binary.version}</artifactId>-->
+        <!--    <version>1.7.2</version>-->
+        <!--    <scope>provided</scope>-->
+        <!--</dependency>-->
+        <!--<dependency>-->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table</artifactId>-->
+        <!--    <version>${flink.version}</version>-->
+        <!--    <type>pom</type>-->
+        <!--    <scope>provided</scope>-->
+        <!--</dependency>-->
+        <!--官网上很秀的 lit() $() 写法（Expression DSL），必须要求bridge依赖-->
         <dependency>
             <groupId>org.apache.flink</groupId>
-            <artifactId>flink-table_${scala.binary.version}</artifactId>
-            <version>1.7.2</version>
-            <!--<scope>provided</scope>-->
+            <artifactId>flink-table-api-java-bridge_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
         </dependency>
+        <!-- Flink 1.9之前均采用开源社区版的Planner -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-planner_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Blink版的Planner -->
+        <!--<dependency>-->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table-planner-blink_${scala.binary.version}</artifactId>-->
+        <!--    <version>1.11.3</version>-->
+        <!--    <scope>provided</scope>-->
+        <!--</dependency>-->
+        <!--<dependency> planner自己会引入这个包 -->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table-api-java</artifactId>-->
+        <!--    <version>${flink.version}</version>-->
+        <!--</dependency>-->
+
+
         <!--https://mvnrepository.com/artifact/org.apache.flink/flink-jdbc-->
         <dependency>
             <groupId>org.apache.flink</groupId>
