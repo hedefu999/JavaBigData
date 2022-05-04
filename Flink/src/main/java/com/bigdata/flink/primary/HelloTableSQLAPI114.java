@@ -19,11 +19,13 @@ import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.LocalStreamEnvironment;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.annotation.FunctionHint;
+import org.apache.flink.table.annotation.InputGroup;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.FormatDescriptor;
@@ -41,11 +43,17 @@ import org.apache.flink.table.api.Tumble;
 import org.apache.flink.table.api.TumbleWithSizeOnTimeWithAlias;
 import org.apache.flink.table.api.bridge.java.StreamStatementSet;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.catalog.Catalog;
+import org.apache.flink.table.catalog.CatalogBaseTable;
+import org.apache.flink.table.catalog.CatalogDatabaseImpl;
 import org.apache.flink.table.catalog.DataTypeFactory;
+import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.functions.AggregateFunction;
+import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.functions.FunctionKind;
+import org.apache.flink.table.functions.FunctionRequirement;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.functions.TableAggregateFunction;
 import org.apache.flink.table.functions.TableFunction;
@@ -61,6 +69,13 @@ import java.net.URL;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.table.api.Expressions.$;
 import static org.apache.flink.table.api.Expressions.CURRENT_RANGE;
@@ -1226,12 +1241,465 @@ public class HelloTableSQLAPI114 {
             final TableResult tableResult2 = streamTableEnv.sqlQuery("select * from order_info").execute();
             tableResult2.print();
         }
+
+        //单条执行和批量执行insert
+        //如果一次想执行多个sink表的写入，就需要使用StreamStatementSet 进行多个 addInsertSql
         static void test3(){
+            //注册 源表 Orders 和 结果存储表 RubberOrders
+            streamTableEnv.executeSql("create table Orders(user bigint, product varchar, amount int) with (...)");
+            streamTableEnv.executeSql("create table RubberOrders(product varchar, amount int) with (...)");
+            //执行 源表 --> 结果表任务
+            TableResult tableResult = streamTableEnv.executeSql("insert into RubberOrders select product,amount from Orders where product like '%Rubber%'");
+            //从TableResult中获取JobStatus
+            System.out.println(tableResult.getJobClient().get().getJobStatus());
+
+            //如果一次想执行多个sink表的写入，就需要使用StreamStatementSet 进行多个 addInsertSql
+            //注册名为 GlassOrders 的 sink table
+            streamTableEnv.executeSql("create table GlassOrders(product varchar, amount int) with (...)");
+            StreamStatementSet stmtSet = streamTableEnv.createStatementSet();
+            stmtSet.addInsertSql("insert into RubberOrders select product,amount from Orders where product like '%Rubber%'");
+            stmtSet.addInsertSql("insert into GlassOrders select product,amount from Orders where product like '%Glass%'");
+            TableResult execute = stmtSet.execute();
+            System.out.println(execute.getJobClient().get().getJobStatus());
+
+            //使用 desc 语法描述表
+            streamTableEnv.executeSql("describe Orders").print();
+            streamTableEnv.executeSql("desc Orders").print();
+
+            //explain语法
+            String sql = "select * from Orders where product like '%Glass%'" +
+                    "union all " +
+                    "select * form RubberOrders where amount > 10";
+            streamTableEnv.executeSql("explain PLAN for " + sql).print();
+            streamTableEnv.executeSql("explain ESTIMATED_COST, CHANGELOG_MODE, JSON_EXECUTION_PLAN for " + sql).print();
+        }
+
+        static void test4(){
+            //使用 use 语句 选择catalog
+            streamTableEnv.executeSql("create catalog cat1 with (...)");
+            streamTableEnv.executeSql("show catalogs").print();
+            // +-----------------+
+            // |    catalog name |
+            // +-----------------+
+            // | default_catalog |
+            // | cat1            |
+            // +-----------------+
+            streamTableEnv.executeSql("use catalog cat1");
+            streamTableEnv.executeSql("show databases").print();
+            streamTableEnv.executeSql("create databases db1 with (...)");
+            streamTableEnv.executeSql("shwo databases").print();
+            // 选择数据库（默认 default_database）
+            streamTableEnv.executeSql("use db1");
+            // 选择模块 (默认 core)
+            streamTableEnv.executeSql("use modules hive");
+            streamTableEnv.executeSql("show full modules").print();
+            // +-------------+-------+
+            // | module name |  used |
+            // +-------------+-------+
+            // |        hive |  true |
+            // |        core | false |
+            // +-------------+-------+
+
+            // 使用load语句加载 module
+            streamTableEnv.executeSql("load module hive with ('hive-version'='3.1.2')");
+            streamTableEnv.executeSql("show modules");
+            // 使用unload语句卸载 module
+            streamTableEnv.executeSql("unload module core");
+        }
+
+        //UDF函数定义
+        public static class SubstrFunction extends ScalarFunction{
+            public String eval(String str, Integer begin, Integer end){
+                return str.substring(begin, end);
+            }
+        }
+        //带有字段属性的UDF函数
+        public static class SubstringFunction extends ScalarFunction{
+            private boolean endInclusive;
+            public SubstringFunction(boolean endInclusive){
+                this.endInclusive = endInclusive;
+            }
+            public String eval(String s, Integer begin, Integer end){
+                return s.substring(begin, endInclusive ? end+1 : end);
+            }
+        }
+        public static class MyConcatFunction extends ScalarFunction{
+            public String eval(@DataTypeHint(inputGroup = InputGroup.ANY) Object... fields){
+                return Arrays.stream(fields).map(Object::toString).collect(Collectors.joining(","));
+            }
+        }
+        //全局定义UDF输出类型
+        @FunctionHint(output = @DataTypeHint("ROW<s STRING, i INT>"))
+        public static class OverloadedFunction extends TableFunction<Row>{
+            public void eval(int a, int b){
+                collect(Row.of("Sum", a+b));
+            }
+            public void eval(){
+                collect(Row.of("Empty args", -1));
+            }
+        }
+        //完全由 FunctionHint 提供类型信息
+        @FunctionHint(
+                input = {@DataTypeHint("INT"), @DataTypeHint("INT")},
+                output = @DataTypeHint("INT")
+        )
+        @FunctionHint(
+                input = {@DataTypeHint("BIGINT"), @DataTypeHint("BINGINT")},
+                output = @DataTypeHint("BIGINT")
+        )
+        @FunctionHint(input = {}, output = @DataTypeHint("BOOLEAN"))
+        //@FunctionHints()
+        public static class OverloadedFunction2 extends TableFunction<Object>{
+            public void eval(Object... o){
+                if (o.length == 0){
+                    collect(false);
+                }
+                collect(o[0]);
+            }
+        }
+        //高阶用法：覆写 getTypeInference 方法实现更灵活的类型解析
+        public static class LiteralFunction extends ScalarFunction{
+            public Object eval(String s, String type){
+                switch (type){
+                    case "INT":
+                        return Integer.valueOf(s);
+                    case "DOUBLE":
+                        return Double.valueOf(s);
+                    case "STRING":
+                    default:
+                        return s;
+                }
+            }
+            @Override
+            public TypeInference getTypeInference(DataTypeFactory typeFactory) {
+                return TypeInference.newBuilder()
+                        .typedArguments(DataTypes.STRING(), DataTypes.STRING())
+                        .outputTypeStrategy(callContext -> {
+                            if (!callContext.isArgumentLiteral(1) || callContext.isArgumentNull(1)){
+                                throw callContext.newValidationError("params missed!");
+                            }
+                            String literal = callContext.getArgumentValue(1, String.class).orElse("STRING");
+                            switch (literal){
+                                case "INT":
+                                    return Optional.of(DataTypes.INT().notNull());
+                                case "DOUBLE":
+                                    return Optional.of(DataTypes.DOUBLE().notNull());
+                                case "STRING":
+                                default:
+                                    return Optional.of(DataTypes.STRING());
+                            }
+                        }).build();
+            }
+        }
+        public static class HashCodeFunction extends ScalarFunction{
+            private int factor = 0;
+            @Override
+            public void open(FunctionContext context) throws Exception {
+                //访问job参数 hashcode_factor ，12是默认值
+                factor = Integer.parseInt(context.getJobParameter("hashcode_factor", "12"));
+            }
+            public int eval(String s){
+                return s.hashCode()*factor;
+            }
+        }
+
+        static void testUDF(){
+            //不注册直接使用Table API调用inline函数
+            streamTableEnv.from("MyTable").select(call(SubstrFunction.class, $("myField"), 5, 12));
+            //注册函数
+            streamTableEnv.createTemporarySystemFunction("SubstrFunction", SubstrFunction.class);
+            //使用Table API调用上面注册的函数
+            streamTableEnv.from("MyTable").select(call("SubstrFunction", $("myField"), 5, 12));
+            //使用SQL调用上面注册的函数
+            streamTableEnv.sqlQuery("select SubstrFunction(myField,5,12) from MyTable");
+
+            //inline方式调用
+            streamTableEnv.from("MyTable").select(call(new SubstringFunction(true), $("myField"), 5,12));
+            streamTableEnv.createTemporarySystemFunction("SubstringFunction", new SubstringFunction(true));
+
+            //UDF函数的入参如果是可变参数 Object ...,可以在Table API中通过通配符*一次传入全部的columns
+            streamTableEnv.from("MyTable").select(call(MyConcatFunction.class, $("*")));
+            //相当于专门指定所有的列
+            streamTableEnv.from("MyTable").select(call(MyConcatFunction.class, $("a"), $("b"), $("c")));
+
+            //UDF 函数在open方法中处理job参数
+            //hashCode计算函数的一个参数通过 flink job 参数传入
+            streamTableEnv.getConfig().addJobParameter("hashcode_factor","31");
+            streamTableEnv.createTemporarySystemFunction("hashCode", HashCodeFunction.class);
+            streamTableEnv.sqlQuery("select myField,hashCode(myField) from MyTable");
+        }
+
+        /*-=-=-=-=-=-=-=-=除了UDF还有一类函数叫 UDTF user defined table function -=-=-=-=-=-=-=-=-*/
+        @FunctionHint(output = @DataTypeHint("ROW<word STRING, length INT>"))
+        public static class SplitFunction extends TableFunction<Row>{
+            public void eval(String str){
+                for(String s : str.split(" ")){
+                    collect(Row.of(s, s.length()));
+                }
+            }
+        }
+        static void testUDTF(){
+            streamTableEnv.from("MyTable")
+                    .joinLateral(call(SplitFunction.class, $("myField")))
+                    .select($("myField"), $("word"), $("length"));
+            streamTableEnv.from("MyTable")
+                    .leftOuterJoinLateral(call(SplitFunction.class, $("myField")))
+                    .select($("myField"), $("word"), $("length"));
+            streamTableEnv.from("MyTable")
+                    .leftOuterJoinLateral(call(SplitFunction.class, $("myField")).as("newWord","newLength"))
+                    .select($("myField"), $("newWord"), $("length"));
+            streamTableEnv.createTemporarySystemFunction("SplitFunction", SplitFunction.class);
+            streamTableEnv.from("MyTable")
+                    .joinLateral(call("SplitFunction", $("myField")))
+                    .select($("myField"), $("word"), $("length"));
+            streamTableEnv.sqlQuery("select myField,word,length " +
+                    "from MyTable, lateral table(SplitFunction(myField))");
+            streamTableEnv.sqlQuery("select myField,word,length " +
+                    "from MyTable left join lateral table(SplitFunction(myField)) on true");
+            streamTableEnv.sqlQuery("select myField,newWod,newLength " +
+                    "from MyTable left join lateral table(SplitFunction(myField)) as T(newWord, newLength) on true");
+        }
+
+        /*-=--=-=-=-=-=-=-=- 用户还可以自定义聚合函数 user-defined aggregate function(UDAGG) =-=-=-=-=-=-=-=-=-=-=-*/
+        //Accumulator可被flink checkpointing机制自动管理，确保 exactly-once 语义
+        public static class WeightedAvgAccumulator{
+            public long sum = 0;
+            public int count = 0;
+        }
+        public static class WeightedAvg extends AggregateFunction<Long, WeightedAvgAccumulator>{
+            @Override
+            public WeightedAvgAccumulator createAccumulator() {
+                return new WeightedAvgAccumulator();
+            }
+            @Override
+            public Long getValue(WeightedAvgAccumulator acc) {
+                if (acc.count == 0){
+                    return null;
+                }else {
+                    return acc.sum / acc.count;
+                }
+            }
+            public void accumulate(WeightedAvgAccumulator acc, Long ivalue, Integer iweight){
+                acc.sum += ivalue * iweight;
+                acc.count += iweight;
+            }
+            //上述3个方法是强制的，merge方法在window处理下会使用到，retract在over window下会被使用到（都实现掉）
+            public void retract(WeightedAvgAccumulator acc, Long ivalue, Integer iweight){
+                acc.sum -= ivalue * iweight;
+                acc.count -= iweight;
+            }
+            public void merge(WeightedAvgAccumulator acc, Iterable<WeightedAvgAccumulator> it){
+                for (WeightedAvgAccumulator ac : it){
+                    acc.count += ac.count;
+                    acc.sum += ac.sum;
+                }
+            }
+            public void resetAccumulator(WeightedAvgAccumulator acc){
+                acc.count = 0;
+                acc.sum = 0L;
+            }
+
+            //@Override 见 Top2AccumulatorFunc
+            //public Set<FunctionRequirement> getRequirements() {
+            //    return null;
+            //}
+        }
+        static void testUDAGG(){
+            streamTableEnv.from("MyTable")
+                    .groupBy($("myField"))
+                    .select($("myField"), call(WeightedAvg.class, $("value"), $("weight")));
+            streamTableEnv.createTemporarySystemFunction("WeightedAvg", WeightedAvg.class);
+            streamTableEnv.from("MyTable")
+                    .groupBy($("myField"))
+                    .select($("myField"), call("WeightedAvg", $("value"), $("weight")));
+            streamTableEnv.sqlQuery("select myField, WeightedAvg(`value`, weight) from MyTable group by myField");
+        }
+
+        /*-==-=-=-=-=-=-=-=--= Table Aggregate Functions =-=-=-=-=-=-=-=-=-=-=-=-*/
+        public static class Top2Accumulator{
+            public Integer first;
+            public Integer second;
+        }
+        public static class Top2AccumulatorFunc extends TableAggregateFunction<Tuple2<Integer,Integer>, Top2Accumulator>{
+            @Override
+            public Top2Accumulator createAccumulator() {
+                Top2Accumulator top2Acc = new Top2Accumulator();
+                top2Acc.first = Integer.MIN_VALUE;
+                top2Acc.second = Integer.MIN_VALUE;
+                return top2Acc;
+            }
+            public void accumulate(Top2Accumulator acc, Integer value){
+                if (value > acc.first){
+                    acc.second = acc.first;
+                    acc.first = value;
+                }else if (value > acc.second){
+                    acc.second = value;
+                }
+            }
+            public void merge(Top2Accumulator acc, Iterable<Top2Accumulator> it) {
+                for (Top2Accumulator otherAcc : it) {
+                    accumulate(acc, otherAcc.first);
+                    accumulate(acc, otherAcc.second);
+                }
+            }
+            public void emitValue(Top2Accumulator acc, Collector<Tuple2<Integer, Integer>> out) {
+                // emit the value and rank
+                if (acc.first != Integer.MIN_VALUE) {
+                    out.collect(Tuple2.of(acc.first, 1));
+                }
+                if (acc.second != Integer.MIN_VALUE) {
+                    out.collect(Tuple2.of(acc.second, 2));
+                }
+            }
+            /*
+            emitUpdateWithRetract 可以用于提升性能，在retract模式下emit已更新的数据
+            如record更新时引起topN数据变化，此时emitValue需要执行N此，此方法可以增量emit update结果 避免频繁emit数据以提升性能
+            */
+
+            //如果希望这个agg函数只在over window上使用，可以声明下面的getRequirements 方法
+            @Override
+            public Set<FunctionRequirement> getRequirements() {
+                Set<FunctionRequirement> set = new HashSet<>();
+                set.add(FunctionRequirement.OVER_WINDOW_ONLY);
+                return set;
+            }
+        }
+        static void testUDTAGG(){
+            streamTableEnv.from("MyTable")
+                    .groupBy($("myField"))
+                    .flatAggregate(call(Top2AccumulatorFunc.class, $("value")))
+                    .select($("myField"), $("f0"), $("f1"));
+            streamTableEnv.from("MyTable")
+                    .groupBy($("myField"))
+                    .flatAggregate(call(Top2AccumulatorFunc.class, $("value")).as("value", "rank"))
+                    .select($("myField"), $("value"), $("rank"));
+            streamTableEnv.createTemporarySystemFunction("Top2AccumulatorFunc", Top2AccumulatorFunc.class);
+            streamTableEnv.from("MyTable")
+                    .groupBy($("myField"))
+                    .flatAggregate(call("Top2AccumulatorFunc", $("value")).as("value", "rank"))
+                    .select($("myField"), $("value"), $("rank"));
 
         }
 
-        public static void main(String[] args) {
+        /*-=-=-=-=-=---==-=-=-=- 上述提及的 emitUpdateWithRetract 方法的使用案例 =-=-=-=-=-=----=-=-=-=-=-=-=-*/
+        public static class Top2WithRetractAccumulator {
+            public Integer first;
+            public Integer second;
+            public Integer oldFirst;
+            public Integer oldSecond;
+        }
+        public static class Top2WithRetract extends TableAggregateFunction<Tuple2<Integer, Integer>, Top2WithRetractAccumulator> {
+            @Override
+            public Top2WithRetractAccumulator createAccumulator() {
+                Top2WithRetractAccumulator acc = new Top2WithRetractAccumulator();
+                acc.first = Integer.MIN_VALUE;
+                acc.second = Integer.MIN_VALUE;
+                acc.oldFirst = Integer.MIN_VALUE;
+                acc.oldSecond = Integer.MIN_VALUE;
+                return acc;
+            }
+            public void accumulate(Top2WithRetractAccumulator acc, Integer v) {
+                if (v > acc.first) {
+                    acc.second = acc.first;
+                    acc.first = v;
+                } else if (v > acc.second) {
+                    acc.second = v;
+                }
+            }
+            public void emitUpdateWithRetract(Top2WithRetractAccumulator acc,RetractableCollector<Tuple2<Integer, Integer>> out){
+                //如果first被更新了才进行emit
+                if (!acc.first.equals(acc.oldFirst)){
+                    if (acc.oldFirst != Integer.MIN_VALUE){
+                        out.retract(Tuple2.of(acc.oldFirst, 1));
+                    }
+                    out.collect(Tuple2.of(acc.first, 1));
+                    acc.oldFirst = acc.first;
+                }
+                //如果second存在更新才考虑进行collect 即emit 结果
+                if (!acc.second.equals(acc.oldSecond)) {
+                    if (acc.oldSecond != Integer.MIN_VALUE) {
+                        out.retract(Tuple2.of(acc.oldSecond, 2));
+                    }
+                    out.collect(Tuple2.of(acc.second, 2));
+                    acc.oldSecond = acc.second;
+                }
+            }
+        }
 
+        /** -=-=-=--=-=-=-= module 模块操作 -=-=-=-=-=-=-=-=-==-=-**/
+        static void testModuleOp(){
+            //使用SQL API
+            streamTableEnv.executeSql("show modules").print();
+            streamTableEnv.executeSql("show full modules").print();
+            streamTableEnv.executeSql("load module hive with('hive-version' = '...')");
+            streamTableEnv.executeSql("user modules hive,core");
+            streamTableEnv.executeSql("unload module hive");
+
+            //使用TableAPI
+            streamTableEnv.listModules();
+            streamTableEnv.listFullModules();
+            //streamTableEnv.loadModule("hive", new HiveModule());
+            //修改module的解析顺序
+            streamTableEnv.useModules("hive", "core");
+            streamTableEnv.unloadModule("hive");
+        }
+        /** -=-=-=--=-=-=-= catalog 操作 -=-=-=-=-=-=-=-=-==-=-**/
+        public static abstract class MyCatalog implements Catalog{
+            //要实现的方法极多
+        }
+        static void testCatalogOp() throws Exception{
+            Map<String,String> properties = new HashMap<>();
+            CatalogDatabaseImpl catalogDatabase = new CatalogDatabaseImpl(properties, "这是评论");
+            MyCatalog myCatalog = null;//new MyCatalog();
+            streamTableEnv.registerCatalog("myCatalog", myCatalog);
+            streamTableEnv.executeSql("create database/table ....");
+            streamTableEnv.listTables();// 打印注册的cataog下的所有表
+            streamTableEnv.listCatalogs();
+
+            //catalog api 演示
+            myCatalog.createDatabase("mydb", catalogDatabase, false);
+            myCatalog.dropDatabase("mydb", false);
+            myCatalog.alterDatabase("mydb", catalogDatabase, false);
+            myCatalog.getDatabase("mydb");
+            myCatalog.databaseExists("mydb");
+            myCatalog.listDatabases();
+
+            //catalog操作 Table View Partition Function
+            //myCatalog.createTable(new ObjectPath("mydb", "mytable"), new CatalogTableImpl(...), false);
+            myCatalog.dropTable(new ObjectPath("mydb", "mytable"), false);
+            myCatalog.renameTable(new ObjectPath("mydb", "mytable"), "my_new_table", false);
+            CatalogBaseTable table = myCatalog.getTable(new ObjectPath("mydb", "myTable"));
+            myCatalog.tableExists(new ObjectPath("mydb", "myTable"));
+            myCatalog.listTables("mydb");
+            myCatalog.listViews("mydb");
+
+            //myCatalog.createPartition(new ObjectPath("",""), new CatalogPartitionSpec(...), new CatalogParitiionImpl(), false);
+            //myCatalog.dropPartition(new ObjectPath("mydb", "mytable"), new CatalogPartitionSpec(...), false);
+            myCatalog.listPartitions(new ObjectPath("mydb", "mytable"));
+            //myCatalog.listPartitionsByFilter(new ObjectPath("mydb", "mytable"), Arrays.asList(expression));
+
+            myCatalog.dropFunction(new ObjectPath("mydb", "myfunc"), false);
+            myCatalog.getFunction(new ObjectPath("mydb", "myfunc"));
+            myCatalog.functionExists(new ObjectPath("mydb", "myfunc"));
+            myCatalog.listFunctions("mydb");
+        }
+
+        static void testTableConfig(){
+            // access flink configuration
+            Configuration configuration = streamTableEnv.getConfig().getConfiguration();
+            // set low-level key-value options
+            configuration.setString("table.exec.mini-batch.enabled", "true");
+            configuration.setString("table.exec.mini-batch.allow-latency", "5 s");
+            configuration.setString("table.exec.mini-batch.size", "5000");
+
+            /** 如何开启 Local-Global Aggregations **/
+            configuration.setString("table.optimizer.agg-phase-strategy", "TWO_PHASE");
+            /** 如何开启 Split-Distinct Aggregations **/
+            configuration.setString("table.optimizer.distinct-agg.split.enabled", "true");
+        }
+
+        public static void main(String[] args) {
+            testModuleOp();
         }
     }
 

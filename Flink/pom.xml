@@ -58,6 +58,12 @@
             <version>${flink.version}</version>
             <scope>provided</scope>
         </dependency>
+        <!--<dependency>-->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table-api-scala-bridge_${scala.binary.version}</artifactId>-->
+        <!--    <version>${flink.version}</version>-->
+        <!--    &lt;!&ndash;<scope>provided</scope>&ndash;&gt;-->
+        <!--</dependency>-->
         <!-- Flink 1.9之前均采用开源社区版的Planner -->
         <dependency>
             <groupId>org.apache.flink</groupId>
