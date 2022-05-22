@@ -41,7 +41,7 @@ public class Hbase2API {
     public static final byte[] FAMILY_BYTES = Bytes.toBytes(FAMILY);
     public static final byte[] QUALIFIER_BYTES = Bytes.toBytes(QUALIFIER);
 
-    private static final Connection connection;
+    private static Connection connection;
     static {
         Configuration config = HBaseConfiguration.create();
         config.set("hbase.zookeeper.quorum", "10.199.171.164");

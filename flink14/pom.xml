@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>LearnBigData</artifactId>
+        <groupId>com.learning</groupId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>flink14</artifactId>
+    <description>v14版的flink table api学习，与旧版本不兼容，独立出一个模块</description>
+
+    <properties>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <!-- primary v14 中的类要编译通过需要使用这个版本 -->
+        <flink.version>1.14.3</flink.version>
+        <scala.binary.version>2.11</scala.binary.version>
+    </properties>
+
+    <dependencies>
+        <!-- flink-table-api  -->
+        <!--<dependency>-->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table-api-java</artifactId>-->
+        <!--    <version>${flink.version}</version>-->
+        <!--    <scope>provided</scope>-->
+        <!--</dependency>-->
+        <!-- lit() $() （Expression DSL），必须要求bridge依赖-->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-api-java-bridge_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!--<dependency>-->
+        <!--    <groupId>org.apache.flink</groupId>-->
+        <!--    <artifactId>flink-table-api-scala-bridge_${scala.binary.version}</artifactId>-->
+        <!--    <version>${flink.version}</version>-->
+        <!--    &lt;!&ndash;<scope>provided</scope>&ndash;&gt;-->
+        <!--</dependency>-->
+        <!-- Flink 1.9之前均采用开源社区版的Planner -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-planner_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>1.18.12</version>
+        </dependency>
+    </dependencies>
+</project>

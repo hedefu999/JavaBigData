@@ -1,4 +1,4 @@
-package com.bigdata.flink.primary;
+package com.bigdata.primary;
 
 import lombok.AllArgsConstructor;
 import lombok.NoArgsConstructor;
@@ -1005,7 +1005,7 @@ public class HelloTableSQLAPI114 {
                     .select($("a"), $("b"), $("e"));
             //Outer Join
             left.leftOuterJoin(right, $("a").isEqual($("d")))
-                    .select($("a"),$("c"),$("e"));
+                    .select($("a"), $("c"), $("e"));
             left.rightOuterJoin(right, $("a").isEqual($("d")));
             left.fullOuterJoin(right, $("a").isEqual($("d")));
 
@@ -1038,7 +1038,7 @@ public class HelloTableSQLAPI114 {
             leftTable.minus(rightTable);
             //minusAll 类似 SQL 的 except all, 与minus相同，除了结果表中存在重复记录，left表中有记录a重复n次，right表中记录a重复m次，则返回结果重复 (n-m) 次
             //in 操作: 字段a在right表中必须存在且类型与left表的中的相同
-            leftTable.select($("a"),$("b")).where($("a").in(rightTable));
+            leftTable.select($("a"), $("b")).where($("a").in(rightTable));
         }
         /*-=-=-=-=-=-=-=-=-=-=-=-= 表的其他操作 OrderBy Offset Fetch =-=-=-=-=-=-=-=-=-=-=-=-=-=-*/
         static void test6(){
@@ -1061,7 +1061,7 @@ public class HelloTableSQLAPI114 {
                     //.groupBy($("w"))  // 仅仅对window进行groupBy 只能在一个单一非并行的任务中
                     .groupBy($("w"), $("user_id")) //并行的任务还要依据额外的一个属性进行 groupBy
                     //窗口使用别名w指定，可以查询start end属性，窗口的start end时间是左闭右开的，如一个30分钟的窗口，start=14:00:00.000,rowtime=14:29:59.999,end=14:30:00.000
-                    .select($("..."),$("w").start(), $("w").end(), $("w").rowtime());
+                    .select($("..."), $("w").start(), $("w").end(), $("w").rowtime());
             //Table API支持的窗口类型
             // -- Tumble
             table.window(Tumble.over(lit(90).seconds()).on($("rowtime")).as($("w")));
@@ -1765,7 +1765,7 @@ public class HelloTableSQLAPI114 {
                     //and来自 org.apache.flink.table.api.Expressions 即 Expression DSL
                     and($("userId").isNotNull(), $("activityNo").isNotNull(), $("orderNo").isNotNull())
             )
-                    .select($("userId").as("user_id"), $("orderNo").lowerCase().as("order_no"), $("price"), $("createTime"),$("rowtime"))
+                    .select($("userId").as("user_id"), $("orderNo").lowerCase().as("order_no"), $("price"), $("createTime"), $("rowtime"))
                     //Tumble.over(lit(90).seconds()) 相当于 Tumble.over("90.seconds")
                     .window(Tumble.over(lit(90).seconds()).on($("rowtime")).as("widow_name_n"))
                     //大概 table api中groupby总是两个字段，第一个总是窗口，第二个是java api中的 keyBy 使用的字段

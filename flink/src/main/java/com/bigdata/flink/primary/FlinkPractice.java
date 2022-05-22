@@ -1,4 +1,4 @@
-package com.bigdata.flink;
+package com.bigdata.flink.primary;
 
 import com.bigdata.flink.function.WphAScoreVariablesWindowFunction;
 import com.bigdata.flink.pojos.AScoreVariablesResult;

@@ -11,6 +11,11 @@
 
     <artifactId>flink</artifactId>
 
+    <properties>
+        <flink.version>1.13.6</flink.version>
+        <scala.binary.version>2.11</scala.binary.version>
+    </properties>
+
     <dependencies>
         <!-- These dependencies are provided, because they should not be packaged into the JAR file. -->
         <dependency>
@@ -64,7 +69,7 @@
         <!--    <version>${flink.version}</version>-->
         <!--    &lt;!&ndash;<scope>provided</scope>&ndash;&gt;-->
         <!--</dependency>-->
-        <!-- Flink 1.9之前均采用开源社区版的Planner -->
+        <!-- Flink 1.9之前均采用开源社区版的Blink Planner -->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-table-planner_${scala.binary.version}</artifactId>
