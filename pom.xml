@@ -6,8 +6,9 @@
 	<artifactId>LearnBigData</artifactId>
 	<version>1.0-SNAPSHOT</version>
 	<modules>
-		<module>Flink</module>
-		<module>Spark</module>
+		<module>flink</module>
+		<module>spark</module>
+		<module>hbase</module>
 	</modules>
 	<packaging>pom</packaging>
 
@@ -15,7 +16,7 @@
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<flink.version>1.14.3</flink.version>
+		<flink.version>1.13.6</flink.version>
 		<target.java.version>8</target.java.version>
 		<scala.binary.version>2.11</scala.binary.version>
 		<maven.compiler.source>${target.java.version}</maven.compiler.source>
