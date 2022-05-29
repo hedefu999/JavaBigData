@@ -27,6 +27,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -41,17 +46,22 @@ public class Hbase2API {
     public static final byte[] FAMILY_BYTES = Bytes.toBytes(FAMILY);
     public static final byte[] QUALIFIER_BYTES = Bytes.toBytes(QUALIFIER);
 
-    private static Connection connection;
-    static {
+    private static Connection DEFAULT_CONNECTION = getConnection(null);
+
+    static Connection getConnection(ExecutorService pool){
         Configuration config = HBaseConfiguration.create();
         config.set("hbase.zookeeper.quorum", "10.199.171.164");
         config.set("hbase.zookeeper.property.clientPort", "2181");
-        config.set("zookeeper.znode.parent", "hbase");
+        config.set("zookeeper.znode.parent", "/hbase");
         try {
-            connection = ConnectionFactory.createConnection(config);
+            if (pool == null){
+                return ConnectionFactory.createConnection(config);
+            }
+            return ConnectionFactory.createConnection(config, pool);
         } catch (IOException e) {
             e.printStackTrace();
         }
+        return null;
     }
 
     //静态变量初始化方法声明异常怎么写？构造函数声明下这个异常
@@ -70,16 +80,16 @@ public class Hbase2API {
             ThreadPoolExecutor poolExecutor = new ThreadPoolExecutor(2, 4, 600,
                     TimeUnit.SECONDS, new SynchronousQueue<Runnable>());
             poolExecutor.prestartAllCoreThreads();
-            table = connection.getTableBuilder(TableName.valueOf(TABLENAME), poolExecutor).build();
+            table = DEFAULT_CONNECTION.getTableBuilder(TableName.valueOf(TABLENAME), poolExecutor).build();
         } else {
-            table = connection.getTable(TableName.valueOf(TABLENAME));
+            table = DEFAULT_CONNECTION.getTable(TableName.valueOf(TABLENAME));
         }
         return table;
     }
 
     /**-=-=-=-=-=-=--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
     static boolean tableExist(String tableName){
-        try (Admin admin = connection.getAdmin()) {
+        try (Admin admin = DEFAULT_CONNECTION.getAdmin()) {
             return admin.tableExists(TableName.valueOf(tableName));
         } catch (IOException e) {
             e.printStackTrace();
@@ -100,7 +110,7 @@ public class Hbase2API {
             tableDescBuilder.setColumnFamily(familyDescriptor);
         }
         TableDescriptor tableDescriptor = tableDescBuilder.build();
-        try(Admin admin = connection.getAdmin()){
+        try(Admin admin = DEFAULT_CONNECTION.getAdmin()){
             admin.createTable(tableDescriptor);
         }
     }
@@ -109,7 +119,7 @@ public class Hbase2API {
     已创建的表增加family
      */
     static void addColumnFamily(String tableName, String... columnFamily) throws Exception{
-        try (Admin admin = connection.getAdmin()){
+        try (Admin admin = DEFAULT_CONNECTION.getAdmin()){
             for (String family : columnFamily){
                 ColumnFamilyDescriptor familyDescriptor = ColumnFamilyDescriptorBuilder.of(family);
                 admin.addColumnFamily(TableName.valueOf(tableName), familyDescriptor);
@@ -122,7 +132,7 @@ public class Hbase2API {
      */
     static void deleteTable(String tableName) throws Exception{
         TableName tName = TableName.valueOf(tableName);
-        try (Admin admin = connection.getAdmin()) {
+        try (Admin admin = DEFAULT_CONNECTION.getAdmin()) {
             //先禁用表再删除表
             admin.disableTable(tName);
             admin.deleteTable(tName);
@@ -131,7 +141,7 @@ public class Hbase2API {
     /**-=-=-=-=-=-=--=-=-=-=- Get API -=-=-=-=-=-=-=-=-=-=-=-=-=*/
     static void get(String tableName, String rowKey, String family, String qualifier) throws Exception{
         TableName tName = TableName.valueOf(tableName);
-        try (Table table = connection.getTable(tName)){
+        try (Table table = DEFAULT_CONNECTION.getTable(tName)){
             Get get = new Get(Bytes.toBytes(rowKey));
             //get.addFamily(Bytes.toBytes(family)); 如果查询指定列簇
             //get.addColumn(Bytes.toBytes(family), Bytes.toBytes(qualifier)); 查询指定列簇的列
@@ -154,7 +164,7 @@ public class Hbase2API {
 
     static void batchGet(String tableName, String... rowKeys) throws Exception{
         TableName tName = TableName.valueOf(tableName);
-        try (Table table = connection.getTable(tName)){
+        try (Table table = DEFAULT_CONNECTION.getTable(tName)){
             List<Get> gets = new ArrayList<>();
             for (String rowKey : rowKeys){
                 Get get = new Get(Bytes.toBytes(rowKey));
@@ -171,7 +181,7 @@ public class Hbase2API {
     使用Scan查询数据
      */
     static void useScan(String tableName, String family, String column) throws Exception{
-        try (Table table = connection.getTable(TableName.valueOf(tableName))){
+        try (Table table = DEFAULT_CONNECTION.getTable(TableName.valueOf(tableName))){
             Scan scan = new Scan();
             //下述 三选一
             scan.setRowPrefixFilter(Bytes.toBytes("rowPrefixXXX"));//根据前缀筛选
@@ -192,6 +202,104 @@ public class Hbase2API {
     }
 
 
+    //对Scan API进行压测
+    static byte[] TAG_RAW_FAMILY = Bytes.toBytes("cf");
+    static byte[] TAG_RAW_QUALIFIER = Bytes.toBytes("v");
+    static TableName TAGRAW_TABLENAME = TableName.valueOf("tag_raw");
+    static ExecutorService badPool = new ThreadPoolExecutor(1,1,100, TimeUnit.SECONDS,new LinkedBlockingDeque<>(1), Executors.defaultThreadFactory());
+    //直接Discard也会抛出异常：超时异常
+    static ExecutorService badNoExceptionPool = new ThreadPoolExecutor(1,1,100, TimeUnit.SECONDS,new LinkedBlockingDeque<>(1),
+            Executors.defaultThreadFactory(), new ThreadPoolExecutor.CallerRunsPolicy());
+
+    static String[] array = {"a","b","c","d","e"};
+    static void insertIntoTagRaw(String rowKeyPrefix) {
+        try (Table table = DEFAULT_CONNECTION.getTable(TAGRAW_TABLENAME)) {
+            long start=197001010800L;
+            for (int i = 0; i < 5; i++) {
+                String index = start + array[i];
+                String rowKey = rowKeyPrefix + ":" + index;
+                System.out.println(rowKey);
+                Put put = new Put(Bytes.toBytes(rowKey));
+                put.addColumn(TAG_RAW_FAMILY, TAG_RAW_QUALIFIER,Bytes.toBytes("value"+array[i]));
+                table.put(put);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        /*
+        b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb:1970010108001-10
+        b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb:a-e
+        b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb:197001010800a-e
+         */
+    }
+
+    public static void main(String[] args) {
+        //insertIntoTagRaw("b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb");
+        batchScan();
+    }
+    static void batchScan(){
+        Connection defaultBatchPoolConn = getConnection(badNoExceptionPool);
+
+        try (Table tag_raw = defaultBatchPoolConn.getTable(TAGRAW_TABLENAME)){
+            Callable<String> callable = new Callable<String>() {
+                @Override
+                public String call() throws Exception {
+                    return scanAtomicOperation(tag_raw);
+                }
+            };
+            Runnable runnable = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        scanAtomicOperation(tag_raw);
+                    } catch (Exception e) {
+                        System.out.println("这就是线上报错：" + e.getCause());
+                    }
+                }
+            };
+            for (int i = 0; i < 10; i++) {
+                FutureTask<String> futureTask = new FutureTask<>(callable);
+                new Thread(futureTask).start();
+                try {
+                    String result = futureTask.get();//10, TimeUnit.MILLISECONDS);
+                    System.out.println("获得结果："+ result);
+                }catch (Exception e){
+                    System.out.println("future task get时发生错误："+e.getCause());
+                }
+            }
+        }catch (Exception e){
+            System.out.println("这就是外层报错：" + e.getCause());
+        }
+    }
+
+    static String scanAtomicOperation(Table table) throws Exception{
+        List<String> collector = new ArrayList<>();
+        String currentThreadName = Thread.currentThread().getName();
+        String rowPrefix = "b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb";
+        Scan scan = new Scan();
+        scan.withStartRow(Bytes.toBytes(rowPrefix + ":1970010108000"));
+        scan.withStopRow(Bytes.toBytes(rowPrefix + ":aaaaaaaaaaaa"));
+        scan.addColumn(TAG_RAW_FAMILY, TAG_RAW_QUALIFIER);
+        scan.readVersions(1);
+        int caching = scan.getCaching();
+        if (caching == 1){
+            System.out.println("change caching");
+            scan.setCaching(500);
+        }
+        try (ResultScanner scanner = table.getScanner(scan)) {
+            //System.out.println(currentThreadName + "start to sleep");
+            //TimeUnit.SECONDS.sleep(5);
+            for (Result result : scanner) {
+                Cell cell = result.getColumnLatestCell(TAG_RAW_FAMILY, TAG_RAW_QUALIFIER);
+                String value = Bytes.toString(CellUtil.cloneValue(cell));
+                collector.add(value);
+            }
+        }
+        String result = currentThreadName + " finished with " + collector.size() + " results";
+        //System.out.println(result);
+        return result;
+    }
+
     /**-=-=-=-=-=-=--=-=-=-=-=- Put API =-=-=-=-=-=-=-=-=-=-=-=-=*/
     static void putSingleLine() throws Exception{
         Put put = new Put(Bytes.toBytes("rowKey"));
@@ -209,7 +317,7 @@ public class Hbase2API {
 
     /**-=-=-=-=-=-=--=-=-=-=-=- Delete API -=-=-=-=-=-=-=-=-=-=-=-=*/
     static void useDeleteAPI(String tableName, String family, String qualifier, String... rowkeys) throws Exception{
-        try (Table table = connection.getTable(TableName.valueOf(tableName))){
+        try (Table table = DEFAULT_CONNECTION.getTable(TableName.valueOf(tableName))){
             List<Delete> deletes = new ArrayList<>();
             for (String rowkey : rowkeys){
                 Delete delete = new Delete(Bytes.toBytes(rowkey));
@@ -252,10 +360,6 @@ public class Hbase2API {
         /*
         [keyvalues={rowkey01/cf:count/1652949042865/Put/vlen=8/seqid=0}, keyvalues={rowkey02/cf:count/1652949042867/Put/vlen=8/seqid=0}, keyvalues={rowkey03/cf:count/1652949042868/Put/vlen=8/seqid=0}]
          */
-    }
-
-    public static void main(String[] args) {
-
     }
 
 }
