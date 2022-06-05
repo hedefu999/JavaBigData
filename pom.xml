@@ -10,7 +10,8 @@
 		<module>spark</module>
 		<module>hbase</module>
 		<module>flink14</module>
-	</modules>
+        <module>zookeeper</module>
+    </modules>
 	<packaging>pom</packaging>
 
 	<name>LearnBigData</name>
