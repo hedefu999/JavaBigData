@@ -203,9 +203,9 @@ public class Hbase2API {
 
 
     //对Scan API进行压测
-    static byte[] TAG_RAW_FAMILY = Bytes.toBytes("cf");
+    static byte[] TAG_RAW_FAMILY = Bytes.toBytes("f");
     static byte[] TAG_RAW_QUALIFIER = Bytes.toBytes("v");
-    static TableName TAGRAW_TABLENAME = TableName.valueOf("tag_raw");
+    static TableName TAGRAW_TABLENAME = TableName.valueOf("tag_raw2");
     static ExecutorService badPool = new ThreadPoolExecutor(1,1,100, TimeUnit.SECONDS,new LinkedBlockingDeque<>(1), Executors.defaultThreadFactory());
     //直接Discard也会抛出异常：超时异常
     static ExecutorService badNoExceptionPool = new ThreadPoolExecutor(1,1,100, TimeUnit.SECONDS,new LinkedBlockingDeque<>(1),
@@ -214,13 +214,13 @@ public class Hbase2API {
     static String[] array = {"a","b","c","d","e"};
     static void insertIntoTagRaw(String rowKeyPrefix) {
         try (Table table = DEFAULT_CONNECTION.getTable(TAGRAW_TABLENAME)) {
-            long start=197001010800L;
-            for (int i = 0; i < 5; i++) {
-                String index = start + array[i];
+            long start=20220529080L;
+            for (int i = 0; i < 50; i++) {
+                String index = "2022052908a0"+i; //start + array[i]
                 String rowKey = rowKeyPrefix + ":" + index;
                 System.out.println(rowKey);
                 Put put = new Put(Bytes.toBytes(rowKey));
-                put.addColumn(TAG_RAW_FAMILY, TAG_RAW_QUALIFIER,Bytes.toBytes("value"+array[i]));
+                put.addColumn(TAG_RAW_FAMILY, TAG_RAW_QUALIFIER,Bytes.toBytes("+value4"+i));//array[i]
                 table.put(put);
             }
         } catch (Exception e) {
@@ -234,37 +234,39 @@ public class Hbase2API {
     }
 
     public static void main(String[] args) {
-        //insertIntoTagRaw("b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb");
+        //insertIntoTagRaw("b:idno_userid:+++VLMh3WukQzHOmOZEpvVCtA5diTz9I");
         batchScan();
     }
     static void batchScan(){
-        Connection defaultBatchPoolConn = getConnection(badNoExceptionPool);
-
+        //{"startRow":"b:idno_userid:+++VLMh3WukQzHOmOZEpvVCtA5diTz9I:2022052900000","stopRow":"b:idno_userid:+++VLMh3WukQzHOmOZEpvVCtA5diTz9I:aaaaaaaaaaaa","batch":-1,"cacheBlocks":true,"totalColumns":1,"maxResultSize":"-1","families":{"f":["v"]},"caching":-1,"maxVersions":1,"timeRange":["0","9223372036854775807"]}
+        Connection defaultBatchPoolConn = getConnection(null);//badNoExceptionPool
+        String startRowKey = "b:idno_userid:+++VLMh3WukQzHOmOZEpvVCtA5diTz9I:202205290000";
+        String endRowKey = "b:idno_userid:+++VLMh3WukQzHOmOZEpvVCtA5diTz9I:209901011010";
         try (Table tag_raw = defaultBatchPoolConn.getTable(TAGRAW_TABLENAME)){
             Callable<String> callable = new Callable<String>() {
                 @Override
                 public String call() throws Exception {
-                    return scanAtomicOperation(tag_raw);
+                    return scanAtomicOperation(tag_raw, startRowKey, endRowKey);
                 }
             };
             Runnable runnable = new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        scanAtomicOperation(tag_raw);
+                        scanAtomicOperation(tag_raw, startRowKey, endRowKey);
                     } catch (Exception e) {
                         System.out.println("这就是线上报错：" + e.getCause());
                     }
                 }
             };
-            for (int i = 0; i < 10; i++) {
+            for (int i = 0; i < 1; i++) {
                 FutureTask<String> futureTask = new FutureTask<>(callable);
                 new Thread(futureTask).start();
                 try {
                     String result = futureTask.get();//10, TimeUnit.MILLISECONDS);
                     System.out.println("获得结果："+ result);
                 }catch (Exception e){
-                    System.out.println("future task get时发生错误："+e.getCause());
+                    System.out.println("future task get时发生错误："+e.getMessage());
                 }
             }
         }catch (Exception e){
@@ -272,13 +274,12 @@ public class Hbase2API {
         }
     }
 
-    static String scanAtomicOperation(Table table) throws Exception{
+    static String scanAtomicOperation(Table table, String startRowKey, String endRowKey) throws Exception{
         List<String> collector = new ArrayList<>();
         String currentThreadName = Thread.currentThread().getName();
-        String rowPrefix = "b:idno_userid:52oQbB3rX1moBYLxqH2mp+IH2Ip3AEKb";
         Scan scan = new Scan();
-        scan.withStartRow(Bytes.toBytes(rowPrefix + ":1970010108000"));
-        scan.withStopRow(Bytes.toBytes(rowPrefix + ":aaaaaaaaaaaa"));
+        scan.withStartRow(Bytes.toBytes(startRowKey));
+        scan.withStopRow(Bytes.toBytes(endRowKey));
         scan.addColumn(TAG_RAW_FAMILY, TAG_RAW_QUALIFIER);
         scan.readVersions(1);
         int caching = scan.getCaching();
