@@ -235,8 +235,11 @@ public class ZkPrimary {
         /*
         ACL API
          */
-        static void test(){
-
+        static void createNodeWithACL(ZooKeeper zooKeeper) throws Exception{
+            String authPath = "/zklearn_acl";
+            //digest 模式权限
+            zooKeeper.addAuthInfo("digest", "userA:passCodeA".getBytes());
+            zooKeeper.create(authPath, "init".getBytes(), ZooDefs.Ids.CREATOR_ALL_ACL, CreateMode.EPHEMERAL);
         }
 
         public static void main(String[] args) throws Exception{
@@ -247,7 +250,8 @@ public class ZkPrimary {
 
             //getDataSync(zooKeeper);
             //getDataAsync(zooKeeper);
-            existsAPI(zooKeeper);
+            //existsAPI(zooKeeper);
+            createNodeWithACL(zooKeeper);
             Thread.sleep(30000);
 
         }
