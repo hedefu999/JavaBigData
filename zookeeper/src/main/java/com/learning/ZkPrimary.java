@@ -240,6 +240,31 @@ public class ZkPrimary {
             //digest 模式权限
             zooKeeper.addAuthInfo("digest", "userA:passCodeA".getBytes());
             zooKeeper.create(authPath, "init".getBytes(), ZooDefs.Ids.CREATOR_ALL_ACL, CreateMode.EPHEMERAL);
+            //此时其他Zookeeper访问会报 KeeperErrorCode=NoAuth for /zklearn_acl
+        }
+        /*
+        delete API的ACL API比较特殊
+         */
+        static void deleteAPIACL() throws Exception{
+            String authPath = "/zklearn_acl";
+            String authPath2 = "/zklearn_acl/child";
+            byte[] token = "token2333".getBytes();
+            String schema = "digest";
+
+            ZooKeeper zkConn0 = getZKConnection();
+            zkConn0.addAuthInfo(schema, token);
+            zkConn0.create(authPath, "init".getBytes(), ZooDefs.Ids.CREATOR_ALL_ACL, CreateMode.PERSISTENT);
+            zkConn0.create(authPath2, "init".getBytes(), ZooDefs.Ids.CREATOR_ALL_ACL, CreateMode.EPHEMERAL);
+            ZooKeeper zkConn1 = getZKConnection();
+            try {
+                zkConn1.delete(authPath2, -1);//将抛异常
+            }catch (Exception e){
+                logger.info("删除节点发生异常：{}", e.getMessage()); //KeeperErrorCode = NoAuth for /zklearn_acl/child
+                zkConn1.addAuthInfo(schema, token);
+                zkConn1.delete(authPath2, -1);
+            }
+            ZooKeeper zkConn2 = getZKConnection();
+            zkConn2.delete(authPath, -1);//没有权限也可以删
         }
 
         public static void main(String[] args) throws Exception{
@@ -251,11 +276,23 @@ public class ZkPrimary {
             //getDataSync(zooKeeper);
             //getDataAsync(zooKeeper);
             //existsAPI(zooKeeper);
-            createNodeWithACL(zooKeeper);
+            deleteAPIACL();
             Thread.sleep(30000);
 
         }
     }
+
+    /**
+     * 研究下开源zk客户端 ZkClient
+     * 听说提供了 session超时重连，watcher反复注册的功能
+     */
+    static class OpenSourceZkClient{
+
+    }
+    static class OpenSourceCurator{
+
+    }
+
     public static void main(String[] args) {
         System.out.println("Hello world!");
     }
