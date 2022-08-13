@@ -821,7 +821,22 @@ public class ZkPrimary {
         System.out.println(header2.getType());
     }
 
+    static void threeIDCDeployment(int n){
+        int n1,n2,n3;
+        n1 = (n-1)/2;
+        int n2_max = (n-n1)/2;
+        for (int i = 1; i <= n2_max; i++) {
+            n2 = i;
+            n3 = n - n1 - n2;
+            if (n3 >= (n1+n2)){
+                continue;
+            }
+            logger.info("n1={},n2={},n3={}", n1,n2,n3);
+        }
+    }
+
     public static void main(String[] args) {
-        System.out.println("Hello world!");
+        //System.out.println("Hello world!");
+        threeIDCDeployment(9);
     }
 }
