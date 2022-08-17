@@ -3,7 +3,6 @@ package com.learning;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerInterceptor;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
@@ -14,9 +13,6 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
-import org.apache.kafka.clients.producer.Callback;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerInterceptor;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
@@ -25,7 +21,6 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serializer;
-import org.apache.kafka.common.serialization.StringSerializer;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -45,74 +40,36 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
+import static com.learning.KafkaConfig.BOOTSTRAP_SERVERS;
+import static com.learning.KafkaConfig.GROUP_ID;
+import static com.learning.KafkaConfig.TOPIC_TEST;
+
 /**
  * 使用教材《深入理解Kafka_核心设计与实践原理》
  */
-public class KafkaLearning {
-    //集群环境下，理论上只要一个broker地址就能找到其他broker，但如果这个broker恰好发生宕机就无法连接了。所以至少要配置两个以上，将集群的所有broker配置上更好
-    public static final String BOOTSTRAP_SERVERS = "localhost:9092";
-    public static final String GROUP_ID = "group.demo";
-    public static final String TOPIC_TEST = "test_topic";
-    private static final CountDownLatch MAIN_THREAD_WAIT = new CountDownLatch(1);
+public class KafkaConsumerPrimary {
+    private static final CountDownLatch COUNT_DOWN_LATCH = new CountDownLatch(1);
 
-
-    private static final KafkaProducer<Integer, String> producer;
+    private static final KafkaConsumer<Integer, String> consumer;
     static {
-        Properties props = new Properties();
-        //Kafka提供了很多常量供使用
-        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
-        //如果不指定client.id， kafka会生成一个类似 producer-1 形式的字符串
-        props.put(CommonClientConfigs.CLIENT_ID_CONFIG, "DemoProducer");
-        //发往broker经网络传输需要对消息做序列化
-        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.IntegerSerializer");
-        //避免拼写错误的办法
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-        //自定义的分区器(比如商品消息的分区对应商品所属仓库的编号)
-        //props.put(ProducerConfig.PARTITIONER_CLASS_CONFIG, "xxx");
-        //KafkaProducer 是线程安全，可以池化后进行使用
-        producer = new KafkaProducer<>(props);
+        Properties properties = new Properties();
+        properties.put("key.deserializer", "org.apache.kafka.common.serialization.IntegerDeserializer");
+        properties.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        properties.put("bootstrap.servers", BOOTSTRAP_SERVERS);
+        //设置消费组名称
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID);
+        //这个client.id不设置的话，kafka会分配一系列 consumer-1 consumer-2 样式的字符串
+        //properties.put("client.id", "consumer.client.id.demo");
+        addCustomerInterceptor(properties);
+        consumer = new KafkaConsumer<Integer, String>(properties);
     }
-
-    static class Producer{
-        private final Boolean isAsync;
-        private String topic;
-
-        public Producer(Boolean isAsync, String topic) {
-            this.isAsync = isAsync;
-            this.topic = topic;
-        }
-
-        public void produce(Integer msgKey, String message){
-            String msg = "Message_"+ message;
-            if (isAsync){// 异步发送(async)，需要传递回调函数(回调函数也是分区有序的！)
-                producer.send(new ProducerRecord<>(topic, msgKey, msg), new Callback() {
-                    @Override
-                    public void onCompletion(RecordMetadata recordMetadata, Exception e) {
-                        System.out.println("exception: "+ ((e == null)?"":e.getMessage()));
-                        System.out.println("#offset: "+ recordMetadata.offset());
-                    }
-                });
-            }else {
-                try { //同步发送(sync)，阻塞等待
-                    producer.send(new ProducerRecord<>(topic, msgKey, msg)).get(5, TimeUnit.SECONDS);
-                } catch (Throwable e) {
-                }
-            }
-            //其实还有第三种发后即忘的写法(fire and forget) 发送性能高但可靠性差
-            //producer.send(new ProducerRecord<>(topic, msgKey, msg));
-            //producer.close(1, TimeUnit.MINUTES);//实际中使用不带超时时间的close方法比较多
-        }
-        public static void main(String[] args) throws Exception {
-            Producer client = new Producer(true, "my-partitioned-topic");
-            client.produce(11,"kafka producer sending message,show offset");
-            client.produce(13, "about offset strategy");
-            client.produce(14, "this topic has 3 partitions");
-            client.produce(15, "these message should be distributed into different partition equally");
-            client.produce(16, "then we could consumer message continuously");
-            client.produce(17, "previous offset was all 2, but got nothing from partitions");
-            client.produce(18, "maybe log clearing has been performed before");
-            MAIN_THREAD_WAIT.await(10, TimeUnit.SECONDS);
-        }
+    static void nonAutoCommit(Properties properties){
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, OffsetResetStrategy.EARLIEST.toString().toLowerCase());
+    }
+    static void addCustomerInterceptor(Properties properties){
+        //KafkaConsumer 拦截器
+        properties.put(ConsumerConfig.INTERCEPTOR_CLASSES_CONFIG, AboutConsumerInterceptor.CustomerInterceptorTTL.class.getName());
     }
 
     static class CustomizeSerializer{
@@ -149,7 +106,6 @@ public class KafkaLearning {
             }
         }
     }
-
     /**
      * 自定义一个ProducerInterceptor
      * 为消息增加前缀 prefix1-
@@ -181,20 +137,6 @@ public class KafkaLearning {
         }
     }
 
-    private static final KafkaConsumer<Integer, String> consumer;
-    static {
-        Properties properties = new Properties();
-        properties.put("key.deserializer", "org.apache.kafka.common.serialization.IntegerDeserializer");
-        properties.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
-        properties.put("bootstrap.servers", BOOTSTRAP_SERVERS);
-        //设置消费组名称
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID+".2");
-        //这个client.id不设置的话，kafka会分配一系列 consumer-1 consumer-2 样式的字符串
-        properties.put("client.id", "consumer.client.id.demo.2");
-        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, OffsetResetStrategy.EARLIEST.toString().toLowerCase());
-        consumer = new KafkaConsumer<Integer, String>(properties);
-    }
     static class Consumer{
         private static final AtomicBoolean isRunning = new AtomicBoolean(true);
         public Consumer() {}
@@ -305,7 +247,6 @@ public class KafkaLearning {
             public void close() {}
         }
     }
-
     /**
      * 关于Kafka中的offset概念
      */
@@ -601,8 +542,55 @@ public class KafkaLearning {
      *
      */
     static class AboutConsumerInterceptor{
-        public static void main(String[] args) {
+        /**
+         * 实现一个消息的TTL功能，当消息时间戳距今超过 10s 就抛弃
+         * 某条消息在既定的时间窗口内无法到达就被视为无效，不需要再继续处理
+         */
+        public static class CustomerInterceptorTTL implements ConsumerInterceptor<String, String> {
+            private static final long EXPIRE_INTERVAL = 10 * 1000;
+            @Override
+            public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String> records) {
+                //收集每个分区过滤后的消息
+                Map<TopicPartition, List<ConsumerRecord<String, String>>> newRecords = new HashMap<>();
+                Set<TopicPartition> partitions = records.partitions();
+                for (final TopicPartition partition : partitions) {
+                    //当前遍历的分区对应的消息集
+                    List<ConsumerRecord<String, String>> partitionRecords = records.records(partition);
+                    List<ConsumerRecord<String,String>> newTpRecords = new ArrayList<>();
+                    for (final ConsumerRecord<String, String> topicRecord : partitionRecords) {
+                        long l = System.currentTimeMillis() - topicRecord.timestamp();
+                        if (l < EXPIRE_INTERVAL){
+                            newTpRecords.add(topicRecord);
+                        }
+                    }
+                    if (!newTpRecords.isEmpty()){
+                        newRecords.put(partition, newTpRecords);
+                    }
+                }
+                return new ConsumerRecords<>(newRecords);
+            }
+            @Override
+            public void onCommit(Map<TopicPartition, OffsetAndMetadata> offsets) {
+                offsets.forEach((tp, offsetMeta) -> {
+                    System.out.printf("%s : %s \n", tp.toString(), offsetMeta.offset());
+                });
+            }
+            @Override
+            public void close() {}
+            @Override
+            public void configure(Map<String, ?> configs) {}
+        }
+        public static void main(String[] args) throws Exception{
+            consumer.subscribe(Arrays.asList(TOPIC_TEST));
+            while (true){
+                ConsumerRecords<Integer, String> records = consumer.poll(Duration.ofMinutes(3));
+                for (final ConsumerRecord<Integer, String> record : records) {
+                    System.out.println(record.value());
+                }
+                consumer.commitSync();
+            }
 
+            //COUNT_DOWN_LATCH.await(3, TimeUnit.MINUTES);
         }
     }
 
