@@ -1,8 +1,14 @@
 package com.learning;
 
+import kafka.admin.TopicCommand;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.CreateTopicsResult;
+import org.apache.kafka.clients.admin.KafkaAdminClient;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerInterceptor;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
@@ -35,7 +41,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
@@ -539,7 +548,7 @@ public class KafkaConsumerPrimary {
         }
     }
     /**
-     *
+     * 消费者拦截器 KafkaConsumerInterceptor 的使用
      */
     static class AboutConsumerInterceptor{
         /**
@@ -591,6 +600,156 @@ public class KafkaConsumerPrimary {
             }
 
             //COUNT_DOWN_LATCH.await(3, TimeUnit.MINUTES);
+        }
+    }
+
+    /**
+     * 多线程消费Kafka消息，由于KafkaConsumer线程不安全，如何进行编码
+     */
+    static class MultiThreadKafkaConsumer{
+        static class KafkaConsumerThread extends Thread{
+            private KafkaConsumer<Integer, String> kafkaConsumer;
+            public KafkaConsumerThread(String topic, Properties properties){
+                this.kafkaConsumer = new KafkaConsumer<Integer, String>(properties);
+                this.kafkaConsumer.subscribe(Arrays.asList(topic));
+            }
+            @Override
+            public void run() {
+                try {
+                    while (true){
+                        ConsumerRecords<Integer, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
+                        for (final ConsumerRecord<Integer, String> record : records) {
+                            //process record
+                        }
+                    }
+                }catch (Exception e){
+                    e.printStackTrace();
+                }finally {
+                    kafkaConsumer.close();
+                }
+            }
+        }
+        public static void main(String[] args) {
+            //创建多个消费线程
+            new KafkaConsumerThread(TOPIC_TEST, null).start();
+        }
+    }
+    /**
+     * 也可以单线程式拉取消息，多线程式地处理消息
+     * 这种写法可以减少KafkaConsumer TCP连接消耗，但难于处理顺序消费消息的问题
+     */
+    static class MultiThreadMessageHandler{
+        static class RecordHandler extends Thread{
+            private Map<TopicPartition, OffsetAndMetadata> offsets;
+            public final ConsumerRecords<Integer, String> records;
+            public RecordHandler(ConsumerRecords<Integer, String> records, Map<TopicPartition, OffsetAndMetadata> offsets){
+                this.records = records;
+                this.offsets = offsets;
+            }
+            @Override
+            public void run() {
+                for (final ConsumerRecord<Integer, String> record : records) {
+                    //process record
+                }
+                /*-=-=-=-=-=- 解决并发处理消息的offset提交问题 （offset需要设置为手动提交）-=-=-=-=-=-*/
+                for (final TopicPartition partition : records.partitions()) {
+                    List<ConsumerRecord<Integer, String>> partitionRecords = records.records(partition);
+                    //process record 应注意捕获异常，防止消息丢失（其他partition正常消费后进行了提交）
+                    long lastConsumedOffset = partitionRecords.get(partitionRecords.size() - 1).offset();
+                    synchronized (offsets){
+                        if (!offsets.containsKey(partition)){
+                            offsets.put(partition, new OffsetAndMetadata(lastConsumedOffset + 1));
+                        }else {
+                            long position = offsets.get(partition).offset();
+                            if (position < lastConsumedOffset + 1){
+                                offsets.put(partition, new OffsetAndMetadata(lastConsumedOffset + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        static class KafkaConsumerThread extends Thread{
+            //引入offsets解决线程池处理多分区消息时的offset提交问题
+            private Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+            private KafkaConsumer<Integer,String> kafkaConsumer;
+            private ExecutorService executorService;
+            private int threadNumber;
+            public KafkaConsumerThread(String topic, int threadNumber, Properties properties){
+                kafkaConsumer = new KafkaConsumer<Integer, String>(properties);
+                kafkaConsumer.subscribe(Arrays.asList(topic));
+                //CallerRunPolicy 可以防止线程池总体消费能力跟不上poll()拉取的能力
+                executorService = new ThreadPoolExecutor(threadNumber, threadNumber, 0L, TimeUnit.SECONDS,
+                        new ArrayBlockingQueue<>(1024), new ThreadPoolExecutor.CallerRunsPolicy());
+            }
+            @Override
+            public void run() {
+                try {
+                    while (true){
+                        ConsumerRecords<Integer, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
+                        if (!records.isEmpty()){
+                            executorService.submit(new RecordHandler(records, offsets));
+                        }
+                        /*-=-= 线程池处理消息时并发处理 offsets， 主线程中对offsets进行提交后重置 =-=-*/
+                        synchronized (offsets){
+                            if (!offsets.isEmpty()){
+                                kafkaConsumer.commitSync(offsets);
+                                offsets.clear();
+                            }
+                        }
+                    }
+                }catch (Exception e){
+                    e.printStackTrace();
+                }finally {
+                    kafkaConsumer.close();
+                }
+            }
+        }
+    }
+
+    /**
+     * 除了使用 kafka-topics 命令管理资源，还可以使用KafkaAdminClient调用API进行资源管理
+     * 这样可以实现自己的集管理、监控、运维、告警为一体的Kafka平台
+     * 旧版Kafka有 kafka.admin.AdminClient 和 kafka.admin.AdminUtils 实现Kafka管理功能，不推荐使用
+     */
+    static class AboutKafkaAdminClient{
+        static AdminClient client = null;
+        static {
+            Properties properties = new Properties();
+            properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
+            properties.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 3000);
+            client = KafkaAdminClient.create(properties);
+        }
+        //变相执行 kafka-topics (不支持 --bootstrap-server 而应使用 --zookeeper)
+        static void describeTopic(){
+            String[] options = new String[]{
+                    "--zookeeper", "localhost:2181",
+                    "--describe",
+                    "--topic", "test-topic"
+            };
+            TopicCommand.main(options);
+        /*
+            Topic:test-topic	PartitionCount:1	ReplicationFactor:1	Configs:
+	        Topic: test-topic	Partition: 0	Leader: 0	Replicas: 0	Isr: 0
+        */
+        }
+
+        static void createTopic() throws Exception{
+            //设置topicName、分区数、负载因子
+            //可以通过 NewTopic 中的 replicasAssignments field 指定副本分配方案
+            NewTopic newTopic = new NewTopic(TOPIC_TEST + "_2", 4, (short) 1);
+            HashMap<String, String> configs = new HashMap<>();
+            configs.put("cleanup.policy", "compact");
+            newTopic.configs(configs);
+            CreateTopicsResult result = client.createTopics(Collections.singletonList(newTopic));
+            result.all().get();
+            client.close();
+            //Kafka commitId : 3402a8361b734732
+        }
+
+        public static void main(String[] args) throws Exception{
+            //describeTopic();
+            createTopic();
         }
     }
 
