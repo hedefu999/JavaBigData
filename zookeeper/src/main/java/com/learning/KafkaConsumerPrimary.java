@@ -6,8 +6,14 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.AlterConfigsResult;
+import org.apache.kafka.clients.admin.Config;
+import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.CreatePartitionsResult;
 import org.apache.kafka.clients.admin.CreateTopicsResult;
+import org.apache.kafka.clients.admin.DescribeConfigsResult;
 import org.apache.kafka.clients.admin.KafkaAdminClient;
+import org.apache.kafka.clients.admin.NewPartitions;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerInterceptor;
@@ -22,11 +28,16 @@ import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.clients.producer.ProducerInterceptor;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.errors.PolicyViolationException;
 import org.apache.kafka.common.errors.WakeupException;
+import org.apache.kafka.common.requests.CreateTopicsRequest;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.server.policy.CreateTopicPolicy;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -741,17 +752,78 @@ public class KafkaConsumerPrimary {
             HashMap<String, String> configs = new HashMap<>();
             configs.put("cleanup.policy", "compact");
             newTopic.configs(configs);
+            //内部就是发送 CreateTopicsRequest 请求到服务端
             CreateTopicsResult result = client.createTopics(Collections.singletonList(newTopic));
             result.all().get();
-            client.close();
+            //Map<String, KafkaFuture<Void>> values = result.values(); values key是topic，KafkaFuture<Void>表示创建后的返回值类型
+            client.close();// 最后要通过close方法释放资源
             //Kafka commitId : 3402a8361b734732
+
+            //client.listTopics();
+            //client.deleteTopics(Arrays.asList(TOPIC_TEST));
         }
 
+        static void describeConfigs() throws Exception{
+            ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, TOPIC_TEST);
+            DescribeConfigsResult result = client.describeConfigs(Collections.singletonList(resource));
+            Config config = result.all().get().get(resource);
+            System.out.println(config);
+            client.close();
+        }
+        //将 topic 的 cleanup.policy 参数修改为 compact
+        static void alterConfig() throws Exception{
+            ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, TOPIC_TEST);
+            ConfigEntry entry = new ConfigEntry("cleanup.policy", "compact");
+            Config config = new Config(Collections.singletonList(entry));
+            Map<ConfigResource, Config> configMap = new HashMap<>();
+            configMap.put(resource, config);
+            AlterConfigsResult alterConfigsResult = client.alterConfigs(configMap);
+            alterConfigsResult.all().get();
+            client.close();
+        }
+        //topic 增加分区数量
+        static void increasePartition() throws Exception{
+            NewPartitions newPartitions = NewPartitions.increaseTo(5);
+            Map<String, NewPartitions> newPartitionsMap = new HashMap<>();
+            newPartitionsMap.put(TOPIC_TEST, newPartitions);
+            CreatePartitionsResult result = client.createPartitions(newPartitionsMap);
+            result.all().get();
+            client.close();
+        }
         public static void main(String[] args) throws Exception{
             //describeTopic();
-            createTopic();
+            //createTopic();
+            describeConfigs();
         }
     }
+
+    /**
+     * 验证主题topic创建的合规性
+     * 通过配置在 config/server.properties 中的Broker参数 create.topic.policy.class.name 进行配置 CreateTopicPolicy 实现类
+     */
+    static class CreateTopicPolicyDemo implements CreateTopicPolicy{
+        // Kafka服务启动时执行
+        @Override
+        public void configure(Map<String, ?> configs) {
+        }
+        //关闭Kafka服务时执行
+        @Override
+        public void close() throws Exception {
+        }
+        //主题创建时会执行，用于鉴定主题参数的合法性
+        @Override
+        public void validate(RequestMetadata requestMetadata) throws PolicyViolationException {
+            if (requestMetadata.numPartitions() != null || requestMetadata.replicationFactor() != null){
+                if (requestMetadata.numPartitions() < 5){
+                    throw new PolicyViolationException("Topic should have at least 5 partitions, received: " + requestMetadata.numPartitions());
+                }
+                if (requestMetadata.replicationFactor() <= 1){
+                    throw new PolicyViolationException("Topic should have at least 2 replication factor, got: " + requestMetadata.replicationFactor());
+                }
+            }
+        }
+    }
+
 
     public static void main(String[] args) {
         double ratio = 0.435;
